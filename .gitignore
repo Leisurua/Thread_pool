@@ -1,0 +1,29 @@
+# 构建产物
+build/
+out/
+cmake-build-*/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+compile_commands.json
+cmake_install.cmake
+install_manifest.txt
+
+# 可执行文件 / 目标文件
+*.exe
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.pdb
+*.ilk
+
+# 编辑器 / 工具
+.vscode/
+.idea/
+.cache/
+*.swp
+*~

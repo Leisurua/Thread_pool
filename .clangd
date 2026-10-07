@@ -1,0 +1,6 @@
+# 与本目录的 ucrt64-debug CMake 预设保持一致。
+CompileFlags:
+  CompilationDatabase: build/ucrt64-debug
+  Compiler: C:/msys64/ucrt64/bin/g++.exe
+  Remove: [-std=*]
+  Add: [-std=c++20]

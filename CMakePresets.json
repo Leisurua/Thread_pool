@@ -1,0 +1,57 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 25,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "ucrt64-base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_CXX_COMPILER": "C:/msys64/ucrt64/bin/g++.exe",
+        "CMAKE_MAKE_PROGRAM": "C:/msys64/ucrt64/bin/ninja.exe",
+        "THREAD_POOL_EXPECTED_GCC_VERSION": "16.2.0",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      },
+      "environment": {
+        "PATH": "C:/msys64/ucrt64/bin;$penv{PATH}"
+      }
+    },
+    {
+      "name": "ucrt64-debug",
+      "displayName": "MSYS2 UCRT64 GCC · Debug",
+      "description": "本机环境：MSYS2 ucrt64 GNU GCC 16.2.0 + Ninja + Debug / C++20",
+      "inherits": "ucrt64-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "THREAD_POOL_WERROR": "ON"
+      }
+    },
+    {
+      "name": "ucrt64-release",
+      "displayName": "MSYS2 UCRT64 GCC · Release",
+      "description": "同环境下的 Release 构建（备用，默认仍是 Debug）",
+      "inherits": "ucrt64-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "THREAD_POOL_WERROR": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "ucrt64-debug",
+      "displayName": "构建 ucrt64-debug",
+      "configurePreset": "ucrt64-debug"
+    },
+    {
+      "name": "ucrt64-release",
+      "displayName": "构建 ucrt64-release",
+      "configurePreset": "ucrt64-release"
+    }
+  ]
+}
