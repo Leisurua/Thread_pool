@@ -25,7 +25,7 @@ cmake --build --preset ucrt64-debug
 ctest --test-dir build/ucrt64-debug --output-on-failure
 ```
 
-构建目录固定为 `build/ucrt64-debug/`，生成 `compile_commands.json`。头文件检查目标验证独立编译和重复包含；submit 测试使用池生命周期桩，worker 测试通过池生命周期/状态桩驱动真实产品 worker。完整池生命周期及关闭接口尚未实现；快照 wait、任务进度登记和暂停恢复已删除。前三轮已通过用户审核，第三轮与 hpp 顺序整理一并提交，之后逐步实现未完成功能。
+构建目录固定为 `build/ucrt64-debug/`，生成 `compile_commands.json`。头文件检查验证独立编译和重复包含；submit、worker、lifecycle 三项测试均链接产品实现，无生命周期/stop 定义桩。submit 测试先关闭并回收 worker 后同步驱动队列，worker 测试使用产品关闭接口，生命周期测试覆盖并发关闭、负责人重入及失败回收。shutdown/shutdown_now/stop 均在 src/thread_pool.cpp 实现，析构复用 stop。shutdown_mutex_ 串行化关闭及回收，queue_mutex_ 保护状态、队列和负责人身份；不再使用 shutdown_complete_，并发调用者等待关闭锁。
 
 单独调用 ctest 或测试可执行文件时，它们继承当前终端环境，不会自动继承 configure/build 预设中的 PATH。若终端尚未包含 UCRT64 运行库目录，可在当前 PowerShell 会话中执行，再运行测试：
 
@@ -53,5 +53,5 @@ $env:PATH = "C:/msys64/ucrt64/bin;$env:PATH"
 - 警告由 `thread_pool` 静态库目标通过 PUBLIC 选项统一施加，本机默认启用 `-Wall -Wextra -Wpedantic -Werror`；修改策略集中在 CMakeLists.txt。
 - 不通过增加 `-Wno-*` 消除告警，先确认并修复真实缺陷。
 - 构建目录固定在已忽略的 `build/`，不引入另一套 `cmake-build-*` 目录。
-- 当前 worker 的 run 位于 `src/thread_pool.cpp`，CMake 将其编译为静态库；其余已实现逻辑仍在头文件，使用方须链接 `thread_pool::thread_pool`。
+- 当前池构造/析构、shutdown/shutdown_now/stop、私有 enqueue 与 worker 的 run 位于 `src/thread_pool.cpp`，CMake 将其编译为静态库；公开 submit 在头文件中准备 Task/future，其余已实现逻辑也在头文件，使用方须链接 `thread_pool::thread_pool`。
 - 未被用户要求实现逻辑时，仅补全声明、依赖类和注释。

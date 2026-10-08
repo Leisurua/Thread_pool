@@ -39,7 +39,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(THREAD_POOL_WERROR "把编译警告视为错误" ON)
 
 # --- 库 ---------------------------------------------------------------------
-# worker 循环在源文件中编译，其余头文件实现与公共编译要求由静态库传递。
+# 池构造/析构及 worker 循环在源文件中编译，其余实现与公共编译要求由静态库传递。
 add_library(thread_pool STATIC src/thread_pool.cpp)
 add_library(thread_pool::thread_pool ALIAS thread_pool)
 
@@ -84,4 +84,9 @@ if(BUILD_TESTING)
     target_link_libraries(thread_pool_worker_test PRIVATE thread_pool::thread_pool)
     add_test(NAME thread_pool_worker COMMAND thread_pool_worker_test)
     set_tests_properties(thread_pool_worker PROPERTIES TIMEOUT 30)
+
+    add_executable(thread_pool_lifecycle_test tests/lifecycle_test.cpp)
+    target_link_libraries(thread_pool_lifecycle_test PRIVATE thread_pool::thread_pool)
+    add_test(NAME thread_pool_lifecycle COMMAND thread_pool_lifecycle_test)
+    set_tests_properties(thread_pool_lifecycle PROPERTIES TIMEOUT 30)
 endif()

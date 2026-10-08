@@ -16,7 +16,7 @@
 #include <utility>
 #include <vector>
 
-// Task、submit 和 worker 循环已实现；池生命周期及关闭逻辑仍待实现。
+// 固定 worker、泛型提交、优雅关闭及立即关闭均已实现。
 enum class status_t : std::int8_t {
     TERMINATED = -1, // 已关闭，所有 worker 已退出
     SHUTDOWN_NOW = 0, // 立即关闭中：丢弃尚未执行的任务，等待正在执行的任务结束
@@ -40,7 +40,7 @@ public:
     work_thread& operator=(work_thread&&) = delete;
 
 private:
-    void run(); // 线程池的 worker 循环；领取持主锁，执行和销毁任务在锁外
+    void run(); // 线程池的 worker 循环；领取持队列锁，执行和销毁任务在锁外
 
     thread_pool& pool_;//池
     std::jthread thread_;//工作线程内部实际jthread
@@ -69,10 +69,10 @@ public:
     // 不支持右值引用结果；由返回类型推导和 static_assert 检查。
     // 成功入队即接受；拒绝/提交失败同步抛出，任务结果经 future 反馈。
     // submit 完美转发保存函数和参数，构造 packaged_task<R()> 并先取得 future。
-    // 再将 packaged_task 移入 Task::model，类型擦除后直接入队。
+    // 再将 packaged_task 移入 Task::model，类型擦除后交给私有 enqueue。
     // Task 不直接保存 promise/future。成功入队后返回 future 句柄，不等待任务执行结束；
     // 调用方通过 future.wait()/get() 等待就绪或获取结果。
-    // 准备 Task/结果反馈在锁外进行；锁内统一检查状态和入队。
+    // submit 锁外准备 Task/结果反馈；enqueue 负责状态检查、安全入队和通知。
     template<class F, class... Args>
     auto submit(F&& function, Args&&... args)
         -> std::future<std::invoke_result_t<std::decay_t<F>&,
@@ -80,7 +80,7 @@ public:
 
     void shutdown();     // 阻塞优雅关闭，排空已接受任务
     void shutdown_now(); // 阻塞立即关闭，丢弃未领取任务，不中断已领取任务
-    // 并发关闭共用最终退出过程，首次生效的关闭方式保持到底（待实现）。
+    // 并发关闭共用最终退出过程，首次生效的关闭方式保持到底。
     // 本池 worker 禁止调用两个关闭接口，须在状态变更前抛 std::logic_error。
 
 private:
@@ -103,6 +103,7 @@ private:
         // 池保证仅执行一次或直接销毁，不对已移动的 Task 调用。
         // 未执行 packaged_task 的销毁通过 future 反馈 broken_promise。
         void operator()() noexcept { task_->execute(); }
+        bool valid() const noexcept { return task_ != nullptr; }
 
     private:
         class base {
@@ -149,20 +150,21 @@ private:
 
     static std::size_t default_worker_count() noexcept;
     bool is_current_worker() const noexcept;
-    void close(status_t requested);   // 共用关闭流程与单次 join（待实现）
+    void enqueue(Task task); // 内部接管有效任务，持锁检查/入队，解锁后通知 worker。
+    void stop(status_t requested); // 队列锁维护原有任务/状态顺序，关闭锁只互斥并发关闭调用。
 
     // 每个线程记录所属池，供关闭接口识别本池 worker，由私有守卫维护。（结构化 不暴露对外API）
     inline static thread_local const thread_pool* current_worker_pool_ = nullptr;
 
-    // 状态、队列与 join 资格统一由此锁保护。
-    // callable、丢弃反馈、用户对象销毁与 worker join 在锁外。
-    std::mutex mutex_;
+    // 只互斥并发关闭调用，持有至 stop 完成；submit 和 worker 不使用此锁。
+    // 同时持两锁时固定按 shutdown_mutex_ -> queue_mutex_ 获取。
+    std::mutex shutdown_mutex_;
+    // 状态、任务队列与负责人身份由队列锁保护；执行、销毁及 join 不持此锁。
+    std::mutex queue_mutex_;
     std::condition_variable task_ready_;
-    std::condition_variable shutdown_complete_;
     status_t state_;
+    std::thread::id closing_thread_id_{}; // 队列锁保护，在获取关闭锁前识别自身重入。
     std::queue<Task> tasks_;
-
-    bool join_in_progress_;
 
     // 最后声明，逆序析构 worker 时同步依赖仍然存活。
     std::vector<std::unique_ptr<work_thread>> worker_threads_;
@@ -199,17 +201,7 @@ auto thread_pool::submit(F&& function, Args&&... args)
     auto future = packaged_task.get_future();
     Task task(std::move(packaged_task));
 
-    // 锁比 task 后构造，异常退出时先解锁，再销毁用户函数和参数。
-    std::unique_lock lock(mutex_);
-
-    if (state_ != status_t::RUNNING) {
-        throw std::runtime_error("thread pool submission rejected");
-    }
-
-    tasks_.push(std::move(task)); // 成功入队即接受；失败直接传播原异常。
-
-    lock.unlock();
-    task_ready_.notify_one();
+    enqueue(std::move(task));
     return future;
 }
 

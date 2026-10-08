@@ -13,62 +13,29 @@
 
 using namespace std::chrono_literals;
 
-// 仅为未实现的池生命周期和公共状态接口提供测试驱动；worker/run 使用产品实现。
+// 仅观察队列/身份及测试局部丢弃锁边界；关闭使用产品接口。
 struct thread_pool_test_access {
-    static void set_state(thread_pool& pool, status_t state) {
-        {
-            std::lock_guard lock(pool.mutex_);
-            pool.state_ = state;
-        }
-        pool.task_ready_.notify_all();
-    }
+    static void notify(thread_pool& pool) { pool.task_ready_.notify_all(); }
 
     static bool is_worker(const thread_pool& pool) {
         return pool.is_current_worker();
     }
 
     static std::size_t queued(thread_pool& pool) {
-        std::lock_guard lock(pool.mutex_);
+        std::lock_guard lock(pool.queue_mutex_);
         return pool.tasks_.size();
-    }
-
-    static void join(thread_pool& pool) {
-        pool.worker_threads_.clear();
     }
 
     static void discard_queued(thread_pool& pool) {
         std::queue<thread_pool::Task> discarded;
         {
-            std::lock_guard lock(pool.mutex_);
+            std::lock_guard lock(pool.queue_mutex_);
             discarded.swap(pool.tasks_);
         }
-        // 局部队列在主锁外销毁，future 反馈 broken_promise。
+        // 局部队列在队列锁外销毁，future 反馈 broken_promise。
     }
 
-    static void close_for_test(thread_pool& pool) {
-        {
-            std::lock_guard lock(pool.mutex_);
-            if (pool.state_ == status_t::RUNNING) {
-                pool.state_ = status_t::SHUTDOWN;
-            }
-        }
-        pool.task_ready_.notify_all();
-        join(pool);
-        discard_queued(pool);
-    }
 };
-
-// 创建真实 worker，初始为 RUNNING；这不是产品的构造/关闭实现。
-thread_pool::thread_pool(std::size_t worker_count)
-    : state_(status_t::RUNNING), join_in_progress_(false) {
-    for (std::size_t index = 0; index < worker_count; ++index) {
-        worker_threads_.push_back(std::make_unique<work_thread>(*this));
-    }
-}
-
-thread_pool::~thread_pool() {
-    thread_pool_test_access::close_for_test(*this);
-}
 
 namespace {
 struct user_error : std::runtime_error {
@@ -155,8 +122,7 @@ void concurrent_producers_execute_once() {
             assert(results[producer][index].get() == expected);
         }
     }
-    thread_pool_test_access::set_state(pool, status_t::SHUTDOWN);
-    thread_pool_test_access::join(pool);
+    pool.shutdown();
     for (const auto& count : calls) {
         assert(count.load(std::memory_order_relaxed) == 1);
     }
@@ -217,9 +183,8 @@ void graceful_shutdown_drains_queue() {
     auto result = pool.submit([] { return 5; });
     assert(result.wait_for(0s) == std::future_status::timeout);
     assert(thread_pool_test_access::queued(pool) == 1);
-    thread_pool_test_access::set_state(pool, status_t::SHUTDOWN);
     release.count_down();
-    thread_pool_test_access::join(pool);
+    pool.shutdown();
     blocker.get();
     assert(result.get() == 5);
     assert(thread_pool_test_access::queued(pool) == 0);
@@ -233,14 +198,8 @@ void immediate_shutdown_preserves_claimed_task() {
     auto second = pool.submit([] { assert(false); });
     auto third = pool.submit([] { assert(false); });
     assert(thread_pool_test_access::queued(pool) == 2);
-    thread_pool_test_access::set_state(pool, status_t::SHUTDOWN_NOW);
-    release.count_down();
-    thread_pool_test_access::join(pool);
-    assert(first.get() == 1);
-    assert(thread_pool_test_access::queued(pool) == 2);
-    thread_pool_test_access::discard_queued(pool);
+    std::jthread closer([&] { pool.shutdown_now(); });
     for (auto* result : {&second, &third}) {
-        assert(result->wait_for(0s) == std::future_status::ready);
         bool discarded = false;
         try { result->get(); }
         catch (const std::future_error& error) {
@@ -248,15 +207,19 @@ void immediate_shutdown_preserves_claimed_task() {
         }
         assert(discarded);
     }
+    release.count_down();
+    closer.join();
+    assert(first.get() == 1);
     assert(thread_pool_test_access::queued(pool) == 0);
 }
 
 void idle_workers_exit() {
-    for (auto state : {status_t::SHUTDOWN, status_t::SHUTDOWN_NOW, status_t::TERMINATED}) {
+    for (bool immediate : {false, true}) {
         thread_pool pool(2);
-        thread_pool_test_access::set_state(pool, status_t::RUNNING);
-        thread_pool_test_access::set_state(pool, state);
-        thread_pool_test_access::join(pool);
+        if (immediate) { pool.shutdown_now(); }
+        else { pool.shutdown(); }
+        pool.shutdown();
+        pool.shutdown_now();
     }
 }
 
@@ -265,10 +228,9 @@ void empty_queue_notification_and_submission() {
     assert(pool.submit([] { return 1; }).get() == 1);
     assert(thread_pool_test_access::queued(pool) == 0);
     // 队列为空时通知而不改变状态；谓词应保持等待，后续提交仍能唤醒执行。
-    thread_pool_test_access::set_state(pool, status_t::RUNNING);
+    thread_pool_test_access::notify(pool);
     assert(pool.submit([] { return 2; }).get() == 2);
-    thread_pool_test_access::set_state(pool, status_t::SHUTDOWN);
-    thread_pool_test_access::join(pool);
+    pool.shutdown();
     assert(thread_pool_test_access::queued(pool) == 0);
 }
 }

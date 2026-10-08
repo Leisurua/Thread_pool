@@ -2,9 +2,9 @@
 
 [项目入口](../README.md) · [内部设计](DESIGN.md) · [实现进度与验证](IMPLEMENTATION.md)
 
-本文描述已确认精简方向及补充决定对应的目标契约。模块 1 至 3 已移除自定义异常、异常包装、cancel、取消标志、快照 wait、任务编号、进度登记及暂停恢复，保留原异常反馈与未执行 Task 销毁时的 broken_promise。前三轮已通过用户审核，第三轮与 hpp 顺序整理一并纳入本次本地提交；公共生命周期仍待实现。
+本文描述已确认精简方向及补充决定对应的目标契约。模块 1 至 3 已移除自定义异常、异常包装、cancel、取消标志、快照 wait、任务编号、进度登记及暂停恢复，保留原异常反馈与未执行 Task 销毁时的 broken_promise。前三轮已通过用户审核；池构造与优雅析构现已实现，公共显式关闭及共用 stop 已实现。
 
-当前已实现 Task、submit、work_thread 生命周期与 run、worker 身份判定、默认 worker 数量及精简后的异常反馈。池构造、析构、公共关闭仍只有声明，完整线程池尚不能直接使用。实际进度与现有测试边界见 [IMPLEMENTATION.md](IMPLEMENTATION.md)。
+当前已实现 Task、submit、work_thread 生命周期与 run、worker 身份判定、默认 worker 数量、池构造/优雅析构及精简后的异常反馈。构造、submit、作用域析构及完整公共关闭均可直接链接使用。实际进度与测试边界见 [IMPLEMENTATION.md](IMPLEMENTATION.md)。
 
 ## 1. 范围与目标接口
 
@@ -23,7 +23,7 @@ void shutdown();
 void shutdown_now();
 ```
 
-已删除 pause()/resume()、池的 wait()/wait_result、任务 ID、历史取消记录、自定义异常体系及取消标志。公共关闭尚未实现，将采用首次关闭方式保持到底，不升级。future.wait()/get() 保留，用于各自任务的等待与取值；不增加替代性的全池等待或取消接口。
+已删除 pause()/resume()、池的 wait()/wait_result、任务 ID、历史取消记录、自定义异常体系及取消标志。公共关闭采用首次关闭方式保持到底，不升级。future.wait()/get() 保留，用于各自任务的等待与取值；不增加替代性的全池等待或取消接口。
 
 暂不实现动态 worker、有界队列、任务窃取和优先级调度。
 
@@ -31,26 +31,26 @@ void shutdown_now();
 
 | 概念 | 判定 |
 | --- | --- |
-| 接受任务 | submit 在主锁内成功入队 |
-| 已领取任务 | worker 在主锁内取得队首 Task 并出队，即使尚未进入 callable |
+| 接受任务 | submit 在队列锁内成功入队 |
+| 已领取任务 | worker 在队列锁内取得队首 Task 并出队，即使尚未进入 callable |
 | 尚未领取任务 | 仍在队列内，没有被 worker 取得 |
 | 执行结束 | 正常返回或异常结束，不要求成功 |
-| 关闭生效 | 首次关闭者在主锁内将 RUNNING 改为一种关闭状态 |
+| 关闭生效 | 首次关闭者在队列锁内将 RUNNING 改为一种关闭状态 |
 | 关闭完成 | 丢弃反馈（如果需要）已完成，全部 worker 已 join，并发布 TERMINATED |
 
-FIFO 保证主锁内领取顺序，不保证多个 worker 实际调用开始顺序或完成顺序。入队、领取和关闭按同一主锁内的生效顺序判定先后，不以函数开始调用的时刻判定。
+FIFO 保证队列锁内领取顺序，不保证多个 worker 实际调用开始顺序或完成顺序。入队、领取和关闭按同一队列锁内的生效顺序判定先后，不以函数开始调用的时刻判定。
 
-用户任务执行、捕获对象销毁及 worker join 均在主锁外；条件变量等待释放主锁。捕获对象的析构可能由 future 共享状态延后，不能保证发生在某个固定线程。
+用户任务执行、捕获对象销毁及 worker join 均不持 queue_mutex_。关闭线程在丢弃和 join 期间持有 shutdown_mutex_，其他关闭调用者等待这把锁时不持队列锁。本文任务处理的“锁外”均指队列锁外。捕获对象的析构可能由 future 共享状态延后，不能保证发生在某个固定线程。
 
-## 3. 构造与析构（待实现）
+## 3. 构造与析构（已实现）
 
-省略数量时采用 std::thread::hardware_concurrency()，返回 0 时保底采用 1；显式传入 0 时抛 std::invalid_argument。默认数量函数已实现，池构造仍待实现。构造成功后为 RUNNING；部分 worker 创建失败时，先通知并回收已创建线程，再传播原异常。
+省略数量时直接采用现有 default_worker_count() 的结果：hardware_concurrency() 返回 0 时保底采用 1；构造内不再重新计算。显式传入 0 时抛 std::invalid_argument。构造成功后为 RUNNING；预留 worker 容器容量后逐个创建，部分失败先通知并回收已创建线程，再传播原异常。
 
-析构采用优雅关闭，等待排队任务、已领取任务和全部 worker 结束；此前显式关闭完成后不重复 join。关闭方式一经生效不改变，也不恢复已丢弃任务。
+析构采用优雅关闭，等待排队任务、已领取任务和全部 worker 结束，join 在队列锁外。析构复用 stop(SHUTDOWN)，已完成的显式关闭直接返回，不重复 join；关闭方式保持到底且不恢复已丢弃任务。
 
 析构前调用方必须协调全部外部访问，使其他线程不再使用该对象。并发关闭支持不意味着可以与池对象的销毁并发访问。
 
-本池 worker 内析构本池调用 std::terminate。关闭负责人在外层关闭尚未完成时重入析构本池也调用 std::terminate，不能销毁仍被外层关闭使用的对象。显式关闭接口的可捕获错误规则见第 6 节。
+本池 worker 内析构本池调用 std::terminate（已实现）。关闭负责人在外层关闭尚未完成时重入析构本池也调用 std::terminate：stop 拒绝负责人重入，异常不能逃逸 noexcept 析构，避免销毁仍被外层关闭使用的对象。显式关闭接口的目标错误规则见第 6 节。
 
 ## 4. submit 与 future（精简完成）
 
@@ -72,7 +72,7 @@ callable 和参数默认按值保存：左值复制、右值移动。执行时�
 | 关闭生效先于入队 | 同步抛 std::runtime_error，不入队、不返回 future |
 | 准备、加锁或入队失败 | 同步传播原异常，不包装、不返回 future，任务未被接受 |
 
-锁外准备 callable、参数及 Task；锁内检查状态并直接入队。入队失败时队列中已有任务保持原状；已移除 ID/set 登记与回滚。已发生的输入移动不回滚，关闭拒绝也不保证输入保持原状；输入被移动不等于任务已接受。
+公开 submit 锁外准备 callable、参数、Task 和 future；私有 enqueue(Task) 在 cpp 中负责锁内检查状态、检查 Task 有效性并直接入队，解锁后通知 worker，submit 再返回 future。enqueue 不对外暴露，也不改变成功入队的接受边界。入队失败时队列中已有任务保持原状，先释放锁再清理 Task；已移除 ID/set 登记与回滚。已发生的输入移动不回滚，关闭拒绝也不保证输入保持原状；输入被移动不等于任务已接受。
 
 用户对象在准备阶段抛出的异常直接传播；即使类型也是 runtime_error，也不转换为另一种“提交失败”异常。调用 submit 前的参数表达式求值异常按普通 C++ 调用规则传播。
 
@@ -80,7 +80,7 @@ callable 和参数默认按值保存：左值复制、右值移动。执行时�
 
 ### 4.3 返回与任务异常
 
-成功入队后通知 worker 并返回 std::future<R>，不等待任务执行结束。submit 可能等待主互斥锁，任务也可能在 submit 返回前完成。
+成功入队后通知 worker 并返回 std::future<R>，不等待任务执行结束。submit 在 enqueue 中可能等待 queue_mutex_，任务也可能在 submit 返回前完成。
 
 Task 保留现有非模板外层、base/model 和 packaged_task 结构，删除取消入口与取消标志，不引入新的任务包装机制。任务执行抛出的异常由 packaged_task 保存，future.get() 按原类型抛出，保留原异常信息；不再包装成 task_execution_error，也不需要 original_exception() 查询。
 
@@ -88,23 +88,25 @@ future.wait() 只等待就绪，不获取结果或抛所存任务异常。get() 
 
 future 就绪不表示 worker 已退出或捕获对象已经销毁。关闭返回时池和 worker 已释放对任务的所有权，但调用方持有的 future 仍可能延长共享状态及捕获对象生命周期。
 
-以下是目标生命周期完成后的示例，当前不能作为完整线程池示例独立链接运行：
+以下示例可直接链接静态库运行，作用域结束时优雅关闭：
 
 ```cpp
 thread_pool pool(2);
 auto result = pool.submit([](int a, int b) { return a + b; }, 3, 4);
 int value = result.get();
-pool.shutdown();
+// pool 析构时排空队列并等待全部 worker。
 ```
 
-## 5. shutdown / shutdown_now（待实现）
+## 5. shutdown / shutdown_now（已实现）
+
+入口先拒绝本池 worker 自关闭，再持 queue_mutex_ 检查 TERMINATED 并直接返回；其余情况解锁调用 stop，分别传入 SHUTDOWN 和 SHUTDOWN_NOW。stop 在队列锁下预检查负责人重入，然后释放队列锁，再获取 shutdown_mutex_ 串行化关闭。在关闭锁内获取队列锁，复查是否已完成，准备丢弃队列并发布关闭状态；释放队列锁后通知 worker、销毁丢弃任务并 join，最后持队列锁发布 TERMINATED、清空负责人，释放关闭锁。其他关闭调用者获得关闭锁后复查已完成状态并返回，不重复回收。入口及 stop 均在 src/thread_pool.cpp 实现。
 
 ### 5.1 任务处理与返回
 
 | 首次生效的接口 | 已领取任务 | 尚未领取任务 | 正常返回条件 |
 | --- | --- | --- | --- |
 | shutdown() | 等待执行结束 | 继续 FIFO 领取并执行 | 所有 worker 已 join |
-| shutdown_now() | 等待执行结束 | 移出队列，在主锁外销毁 Task | 丢弃反馈已完成，所有 worker 已 join |
+| shutdown_now() | 等待执行结束 | 移出队列，在队列锁外销毁 Task | 丢弃反馈已完成，所有 worker 已 join |
 
 两种接口均阻塞、返回 void，开始关闭后拒绝新提交。异常结束也算执行结束；正常返回不要求先调用 future.get()，关闭不汇总任务异常。
 
@@ -114,9 +116,11 @@ shutdown_now() 不强制中断已领取任务；“立即”不表示立即返�
 
 丢弃反馈通过 future 提供，不使 shutdown_now() 同步抛“任务取消”异常。
 
+shutdown_now() 在改变状态前准备局部丢弃队列；若该分配失败，同步传播 std::bad_alloc，本次调用不改变状态、队列或负责人身份，可重试关闭。并发情况下仍可能由其他关闭调用生效。
+
 ### 5.2 并发与重复调用
 
-池外线程允许重复或并发关闭。首次在主锁内生效的调用确定关闭方式并成为唯一关闭负责人，负责清理和 join；其他调用者等待同一次关闭完成，不重复访问或 join worker 集合。
+池外线程允许重复或并发关闭。首次在队列锁内生效的调用确定关闭方式并成为唯一关闭负责人，负责清理和 join；其他调用者等待同一次关闭完成，不重复访问或 join worker 集合。
 
 | 当前情况 | 后续 shutdown() | 后续 shutdown_now() |
 | --- | --- | --- |
@@ -128,11 +132,11 @@ shutdown_now() 不强制中断已领取任务；“立即”不表示立即返�
 
 第 6 节的自等待检测优先于上述等待/返回规则，不能借重复调用绕过检测。
 
-## 6. 自等待检测与调用方边界（待接入）
+## 6. 自等待检测与调用方边界（已接入）
 
 本池 worker 调用本池 shutdown() 或 shutdown_now()，在状态修改和等待前同步抛 std::logic_error。已有 worker 身份登记与判定继续保留，仅匹配本池，不将其他池 worker 误判为本池 worker。
 
-正在关闭本池的负责人线程再次调用本池任一关闭接口，在进入等待前同步抛 std::logic_error；不改变外层关闭状态、方式或进度，也不重复 join。内部仅增加一个由主锁保护的负责人线程 ID，不扩展公共 API。
+正在关闭本池的负责人线程再次调用本池任一关闭接口，在获取关闭锁之前同步抛 std::logic_error；不改变外层关闭状态、方式或进度，也不重复 join。负责人线程 ID 由队列锁保护，不扩展公共 API。
 
 负责人身份覆盖首次关闭生效到清理丢弃任务、join 和发布完成的整个期间。捕获对象析构在该线程清理任务时重入关闭可被识别；它必须自行捕获 logic_error，不能让异常逃逸 noexcept 析构。捕获对象若在关闭期间 submit 到本池，也须处理提交拒绝异常。
 
@@ -151,6 +155,8 @@ shutdown_now() 不强制中断已领取任务；“立即”不表示立即返�
 | 未领取任务被立即关闭丢弃 | future.get() 抛 std::future_error(broken_promise) |
 | worker 自关闭、关闭负责人重入显式关闭 | 对应关闭接口同步抛 std::logic_error |
 | worker_count 为 0 | 构造同步抛 std::invalid_argument |
+| 构造分配或线程创建失败 | 构造同步传播原异常，回收已创建 worker |
+| 立即关闭的丢弃队列准备失败 | shutdown_now() 同步传播 std::bad_alloc，本次调用不改变池状态或已有任务 |
 | worker 或关闭负责人重入析构本池 | std::terminate |
 
-提交拒绝、准备/入队失败、任务异常和未执行 Task 销毁反馈已按模块 1 落实；公共关闭、构造及析构错误仍待生命周期模块接入。具体进度与实际测试覆盖见 IMPLEMENTATION.md。
+提交拒绝、准备/入队失败、任务异常、未执行 Task 销毁反馈、构造和优雅析构已落实；worker 自关闭拒绝已在入口接入；共用关闭流程及负责人身份检测均已实现。具体进度与测试覆盖见 IMPLEMENTATION.md。

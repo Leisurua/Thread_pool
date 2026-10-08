@@ -50,6 +50,16 @@ struct slow_copy {
     slow_copy(slow_copy&& other) noexcept : entered(other.entered), release(other.release) {}
     int operator()() & { return 2; }
 };
+
+struct submit_on_rejected_cleanup {
+    thread_pool& pool;
+    int& cleanups;
+    ~submit_on_rejected_cleanup() {
+        // 被拒绝任务的捕获在锁外释放，否则再次进入 enqueue 会死锁。
+        try { (void)pool.submit([] {}); }
+        catch (const std::runtime_error&) { ++cleanups; }
+    }
+};
 }
 
 void* operator new(std::size_t size) {
@@ -74,18 +84,17 @@ void operator delete[](void* memory) noexcept { std::free(memory); }
 void operator delete(void* memory, std::size_t) noexcept { std::free(memory); }
 void operator delete[](void* memory, std::size_t) noexcept { std::free(memory); }
 
-// 测试专用池生命周期桩：不创建真实 worker，提交测试由友元访问器同步驱动。
-thread_pool::thread_pool(std::size_t)
-    : state_(status_t::RUNNING), join_in_progress_(false) {}
-thread_pool::~thread_pool() = default;
-
 struct thread_pool_test_access {
     static void exercise_submit(thread_pool& pool);
 };
 
 void thread_pool_test_access::exercise_submit(thread_pool& pool) {
+    // 使用产品构造/析构；先退出并回收 worker，再通过状态桩同步驱动 submit/Task。
+    pool.shutdown();
+    pool.state_ = status_t::RUNNING;
+
     auto take = [&] {
-        std::lock_guard lock(pool.mutex_);
+        std::lock_guard lock(pool.queue_mutex_);
         assert(!pool.tasks_.empty());
         auto task = std::move(pool.tasks_.front());
         pool.tasks_.pop();
@@ -100,6 +109,21 @@ void thread_pool_test_access::exercise_submit(thread_pool& pool) {
             execute_one();
         }
     };
+
+    // 内部 enqueue 拒绝已移动的空 Task，有效任务仍可入队并取得原 future 结果。
+    std::packaged_task<int()> operation([] { return 19; });
+    auto queued_result = operation.get_future();
+    thread_pool::Task empty(std::move(operation));
+    auto valid = std::move(empty);
+    assert(!empty.valid() && valid.valid());
+    bool invalid_rejected = false;
+    try { pool.enqueue(std::move(empty)); }
+    catch (const std::invalid_argument&) { invalid_rejected = true; }
+    assert(invalid_rejected && pool.tasks_.empty());
+    assert(queued_result.wait_for(std::chrono::seconds(0)) == std::future_status::timeout);
+    pool.enqueue(std::move(valid));
+    execute_one();
+    assert(queued_result.get() == 19);
 
     // 返回类型混合入队；submit 返回时没有 worker，因此 future 必须仍未就绪。
     int input = 5;
@@ -173,6 +197,14 @@ void thread_pool_test_access::exercise_submit(thread_pool& pool) {
         }
         assert(rejected && pool.tasks_.empty());
     }
+
+    int cleanups = 0;
+    auto probe = std::unique_ptr<submit_on_rejected_cleanup>(
+        new submit_on_rejected_cleanup{pool, cleanups});
+    bool cleanup_submission_rejected = false;
+    try { (void)pool.submit([owned = std::move(probe)] { assert(false); }); }
+    catch (const std::runtime_error&) { cleanup_submission_rejected = true; }
+    assert(cleanup_submission_rejected && cleanups == 1 && pool.tasks_.empty());
     pool.state_ = status_t::RUNNING;
 
     // 用户复制构造抛出的 runtime_error 派生异常保持类型与信息。
@@ -184,7 +216,7 @@ void thread_pool_test_access::exercise_submit(thread_pool& pool) {
     }
     assert(original_error && pool.tasks_.empty());
 
-    // 受控复制尚未完成时，另一个 submit 可先入队并执行，证明准备不占主锁。
+    // 受控复制尚未完成时，另一个 submit 可先入队并执行，证明准备不占队列锁。
     std::latch entered(1), release(1);
     slow_copy slow(entered, release);
     std::future<int> slow_result;
