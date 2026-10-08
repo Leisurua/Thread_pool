@@ -64,10 +64,11 @@ private:
     std::exception_ptr original_;
 };
 
-// 非法状态操作、并发 wait 或本池 worker 自等待。
+// 仅保存调用错误消息；非法状态、并发 wait 和 worker 自等待由线程池判定。
 class thread_pool_call_error : public std::logic_error {
 public:
-    explicit thread_pool_call_error(const char* message);
+    explicit thread_pool_call_error(const char* message)
+        : std::logic_error(message) {}
 };
 
 class thread_pool;
@@ -98,7 +99,7 @@ class thread_pool {
     friend struct thread_pool_test_access;
 
 public:
-    // 默认硬件并发数，返回 0 时采用 1；显式传入 0 应抛 invalid_argument。
+    // 默认采用硬件并发数，无法获取（返回 0）时采用 1；显式传入 0 应抛 invalid_argument。
     explicit thread_pool(std::size_t worker_count = default_worker_count());
     // 默认优雅关闭；已立即关闭时保持该方式，等待所有 worker 退出。
     // 调用方须协调外部访问；本池 worker 中析构本池应 terminate。
@@ -256,6 +257,11 @@ inline work_thread::work_thread(thread_pool& pool)
 
 // 池须先设置退出状态并通知 worker；jthread 的 stop 请求不替代池状态协议。
 inline work_thread::~work_thread() = default;
+
+inline std::size_t thread_pool::default_worker_count() noexcept {
+    const auto count = std::thread::hardware_concurrency();
+    return count == 0 ? 1 : count;
+}
 
 inline bool thread_pool::is_current_worker() const noexcept {
     return current_worker_pool_ == this;
