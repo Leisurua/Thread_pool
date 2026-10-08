@@ -16,8 +16,7 @@ if(DEFINED THREAD_POOL_EXPECTED_GCC_VERSION)
 endif()
 
 # --- 构建类型 ---------------------------------------------------------------
-# 本机使用 Ninja(单配置生成器)：未显式指定时默认 Debug，与 README 声明的
-# 「CPP20 Windows / MSYS2 ucrt64 GNU GCC 16.2.0、CMake + Ninja、Debug」一致。
+# 单配置生成器未显式指定构建类型时默认 Debug。
 if(NOT CMAKE_CONFIGURATION_TYPES)
     if(NOT CMAKE_BUILD_TYPE)
         set(CMAKE_BUILD_TYPE Debug CACHE STRING "构建类型" FORCE)
@@ -27,19 +26,16 @@ if(NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 # --- 语言标准 ---------------------------------------------------------------
-# GCC 16.2.0 的默认标准已是 C++20，CMake 因而不会补 -std= 参数；只写
-# target_compile_features(cxx_std_20) 的话，合规性其实由编译器默认值兜底，
-# 将来编译器默认升到 C++23（或换用更旧的 GCC）语言模式就会漂移。
-# 这里显式钉死：EXTENSIONS OFF 使实际参数为 -std=c++20（而非 -std=gnu++20），
-# 与 docs/IMPLEMENTATION.md 记录的手工命令一致。
+# 显式固定 C++20 并禁用 GNU 扩展，避免语言模式随编译器默认标准漂移。
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(THREAD_POOL_WERROR "把编译警告视为错误" ON)
+option(THREAD_POOL_BUILD_BENCHMARKS "构建独立 Release 性能基准" OFF)
 
 # --- 库 ---------------------------------------------------------------------
-# 池构造/析构及 worker 循环在源文件中编译，其余实现与公共编译要求由静态库传递。
+# 生命周期、关闭、enqueue 与 worker 循环编入静态库，公共编译要求传递给使用方。
 add_library(thread_pool STATIC src/thread_pool.cpp)
 add_library(thread_pool::thread_pool ALIAS thread_pool)
 
@@ -52,7 +48,7 @@ target_compile_features(thread_pool PUBLIC cxx_std_20)
 find_package(Threads REQUIRED)
 target_link_libraries(thread_pool PUBLIC Threads::Threads)
 
-# 警告集与 docs/IMPLEMENTATION.md 记录的手工 g++ 命令保持一致。
+# 统一配置库及使用方的编译警告。
 if(MSVC)
     set(THREAD_POOL_WARNINGS /W4 /permissive-)
 else()
@@ -74,7 +70,52 @@ add_library(thread_pool_header_check OBJECT
 target_link_libraries(thread_pool_header_check PRIVATE thread_pool::thread_pool)
 
 include(CTest)
+if(THREAD_POOL_BUILD_BENCHMARKS)
+    add_executable(thread_pool_benchmark
+        benchmarks/thread_pool_benchmark.cpp benchmarks/workloads.cpp)
+    target_link_libraries(thread_pool_benchmark PRIVATE thread_pool::thread_pool)
+    set_property(TARGET thread_pool_benchmark PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
+    target_compile_definitions(thread_pool_benchmark PRIVATE
+        THREAD_POOL_BENCHMARK_BUILD_TYPE="${CMAKE_BUILD_TYPE}")
+endif()
+
 if(BUILD_TESTING)
+    add_executable(thread_pool_basic_execution_test tests/basic_execution_test.cpp)
+    target_link_libraries(thread_pool_basic_execution_test PRIVATE thread_pool::thread_pool)
+    foreach(basic_case IN ITEMS workers exactly_once future_results move_only_and_ref exception_recovery)
+        add_test(NAME thread_pool_basic_${basic_case}
+            COMMAND thread_pool_basic_execution_test ${basic_case})
+        set_tests_properties(thread_pool_basic_${basic_case} PROPERTIES
+            TIMEOUT 30 LABELS basic_execution)
+    endforeach()
+
+    add_executable(thread_pool_shutdown_test tests/shutdown_test.cpp)
+    target_link_libraries(thread_pool_shutdown_test PRIVATE thread_pool::thread_pool)
+    foreach(shutdown_case IN ITEMS empty_queue drains_queue waits_running rejects_submit repeated_shutdown concurrent_shutdown)
+        add_test(NAME thread_pool_shutdown_${shutdown_case}
+            COMMAND thread_pool_shutdown_test ${shutdown_case})
+        set_tests_properties(thread_pool_shutdown_${shutdown_case} PROPERTIES
+            TIMEOUT 30 LABELS graceful_shutdown)
+    endforeach()
+
+    add_executable(thread_pool_shutdown_now_test tests/shutdown_now_test.cpp)
+    target_link_libraries(thread_pool_shutdown_now_test PRIVATE thread_pool::thread_pool)
+    foreach(shutdown_now_case IN ITEMS discards_unclaimed discarded_future claimed_result idle_workers_exit claim_race waits_running)
+        add_test(NAME thread_pool_shutdown_now_${shutdown_now_case}
+            COMMAND thread_pool_shutdown_now_test ${shutdown_now_case})
+        set_tests_properties(thread_pool_shutdown_now_${shutdown_now_case} PROPERTIES
+            TIMEOUT 30 LABELS immediate_shutdown)
+    endforeach()
+
+    add_executable(thread_pool_close_race_test tests/close_race_test.cpp)
+    target_link_libraries(thread_pool_close_race_test PRIVATE thread_pool::thread_pool)
+    foreach(close_race_case IN ITEMS first_mode waiters_wait worker_self_close owner_reentry other_pool_worker repeated_close)
+        add_test(NAME thread_pool_close_race_${close_race_case}
+            COMMAND thread_pool_close_race_test ${close_race_case})
+        set_tests_properties(thread_pool_close_race_${close_race_case} PROPERTIES
+            TIMEOUT 30 LABELS close_race)
+    endforeach()
+
     add_executable(thread_pool_submit_test tests/submit_test.cpp)
     target_link_libraries(thread_pool_submit_test PRIVATE thread_pool::thread_pool)
     add_test(NAME thread_pool_submit COMMAND thread_pool_submit_test)
@@ -87,6 +128,14 @@ if(BUILD_TESTING)
 
     add_executable(thread_pool_lifecycle_test tests/lifecycle_test.cpp)
     target_link_libraries(thread_pool_lifecycle_test PRIVATE thread_pool::thread_pool)
-    add_test(NAME thread_pool_lifecycle COMMAND thread_pool_lifecycle_test)
-    set_tests_properties(thread_pool_lifecycle PROPERTIES TIMEOUT 30)
+    foreach(lifecycle_case IN ITEMS worker_count zero_worker_count
+            partial_construction_failure destruction_drains destruction_after_close
+            enqueue_allocation_failure capture_destroyed_outside_lock worker_self_close
+            concurrent_close_graceful concurrent_close_immediate discarded_capture_reentry
+            shutdown_preparation_failure)
+        add_test(NAME thread_pool_lifecycle_${lifecycle_case}
+            COMMAND thread_pool_lifecycle_test ${lifecycle_case})
+        set_tests_properties(thread_pool_lifecycle_${lifecycle_case} PROPERTIES
+            TIMEOUT 30 LABELS lifecycle)
+    endforeach()
 endif()

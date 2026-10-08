@@ -38,7 +38,8 @@
       "inherits": "ucrt64-base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "THREAD_POOL_WERROR": "ON"
+        "THREAD_POOL_WERROR": "ON",
+        "THREAD_POOL_BUILD_BENCHMARKS": "ON"
       }
     }
   ],

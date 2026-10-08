@@ -16,17 +16,17 @@
 #include <utility>
 #include <vector>
 
-// 固定 worker、泛型提交、优雅关闭及立即关闭均已实现。
+// 池状态；实际状态由 thread_pool 的队列锁保护。
 enum class status_t : std::int8_t {
-    TERMINATED = -1, // 已关闭，所有 worker 已退出
-    SHUTDOWN_NOW = 0, // 立即关闭中：丢弃尚未执行的任务，等待正在执行的任务结束
-    RUNNING = 1, // 正在运行
+    TERMINATED = -1, // 关闭完成，所有 worker 已 join
+    SHUTDOWN_NOW = 0, // 立即关闭中：丢弃未领取任务，等待已领取任务结束
+    RUNNING = 1, // 接受提交，worker 领取或等待任务
     SHUTDOWN = 2 // 优雅关闭中：继续执行排队任务
 };
 
 class thread_pool;
 
-// 具体工作线程，与 thread_pool 互为友元。
+// 持有所属池的引用，以 jthread 管理一个 worker 的生命周期。
 class work_thread {
     friend class thread_pool;
 
@@ -42,8 +42,8 @@ public:
 private:
     void run(); // 线程池的 worker 循环；领取持队列锁，执行和销毁任务在锁外
 
-    thread_pool& pool_;//池
-    std::jthread thread_;//工作线程内部实际jthread
+    thread_pool& pool_; // 池须存活至本 worker 退出。
+    std::jthread thread_; // 析构时 join；退出由池状态和通知驱动。
 };
 
 // 维护 FIFO 任务队列与固定 worker 集合。
@@ -52,10 +52,10 @@ class thread_pool {
     friend struct thread_pool_test_access;
 
 public:
-    // 默认采用硬件并发数，无法获取（返回 0）时采用 1；显式传入 0 应抛 invalid_argument。
+    // 默认采用硬件并发数，返回 0 时采用 1；显式传入 0 抛 std::invalid_argument。
     explicit thread_pool(std::size_t worker_count = default_worker_count());
-    // 默认优雅关闭；已立即关闭时保持该方式，等待所有 worker 退出。
-    // 调用方须协调外部访问；本池 worker 中析构本池应 terminate。
+    // 默认优雅关闭；显式关闭已完成时直接返回。
+    // 析构前须结束外部访问；本池 worker 或关闭负责人重入析构会 terminate。
     ~thread_pool();
 
     thread_pool(const thread_pool&) = delete;
@@ -65,23 +65,19 @@ public:
 
     // 按值保存：左值复制、右值移动；借用须显式 std::ref/std::cref。
     // 保存的 callable 作为左值调用，保存的参数作为右值传入。
-    // 支持 move-only callable/参数，以及值、void、左值引用结果。
-    // 不支持右值引用结果；由返回类型推导和 static_assert 检查。
-    // 成功入队即接受；拒绝/提交失败同步抛出，任务结果经 future 反馈。
-    // submit 完美转发保存函数和参数，构造 packaged_task<R()> 并先取得 future。
-    // 再将 packaged_task 移入 Task::model，类型擦除后交给私有 enqueue。
-    // Task 不直接保存 promise/future。成功入队后返回 future 句柄，不等待任务执行结束；
-    // 调用方通过 future.wait()/get() 等待就绪或获取结果。
-    // submit 锁外准备 Task/结果反馈；enqueue 负责状态检查、安全入队和通知。
+    // 支持 move-only callable/参数，以及值、void、左值引用结果；不支持右值引用结果。
+    // 成功入队即接受并返回 future，不等待任务结束；准备/入队失败传播原异常。
+    // 关闭后拒绝提交，抛 std::runtime_error；输入已经发生的移动不回滚。
+    // 任务原异常和未领取任务被丢弃的 broken_promise 由 future.get() 反馈。
     template<class F, class... Args>
     auto submit(F&& function, Args&&... args)
         -> std::future<std::invoke_result_t<std::decay_t<F>&,
                                            std::decay_t<Args>&&...>>;
 
-    void shutdown();     // 阻塞优雅关闭，排空已接受任务
-    void shutdown_now(); // 阻塞立即关闭，丢弃未领取任务，不中断已领取任务
-    // 并发关闭共用最终退出过程，首次生效的关闭方式保持到底。
-    // 本池 worker 禁止调用两个关闭接口，须在状态变更前抛 std::logic_error。
+    // 两种关闭均等待所有 worker 退出；首次生效的方式保持到底，并发调用等待完成。
+    // 本池 worker 自关闭或关闭负责人同线程重入，在状态变更/等待前抛 std::logic_error。
+    void shutdown();     // 阻塞优雅关闭，排空已接受任务。
+    void shutdown_now(); // 丢弃未领取任务，不中断已领取任务；仍阻塞等待退出。
 
 private:
     // 外层为统一类型；内部 model<R> 持有 submit 准备好的 packaged_task<R()>。
@@ -126,7 +122,7 @@ private:
         };
 
         std::unique_ptr<base> task_;
-    };//自实现task类进行擦除
+    };
 
     // worker 入口登记所属池，离开作用域时恢复；work_thread 通过友元访问。
     class worker_identity_guard {
@@ -153,7 +149,7 @@ private:
     void enqueue(Task task); // 内部接管有效任务，持锁检查/入队，解锁后通知 worker。
     void stop(status_t requested); // 队列锁维护原有任务/状态顺序，关闭锁只互斥并发关闭调用。
 
-    // 每个线程记录所属池，供关闭接口识别本池 worker，由私有守卫维护。（结构化 不暴露对外API）
+    // TLS 身份由私有守卫维护，供关闭接口识别本池 worker。
     inline static thread_local const thread_pool* current_worker_pool_ = nullptr;
 
     // 只互斥并发关闭调用，持有至 stop 完成；submit 和 worker 不使用此锁。
@@ -186,7 +182,7 @@ auto thread_pool::submit(F&& function, Args&&... args)
     static_assert(!std::is_rvalue_reference_v<result_type>,
                   "thread_pool does not support rvalue-reference results");
 
-    // 锁外准备；准备失败直接传播，用户异常由 packaged_task 存入 future。
+    // 队列锁外保存 callable/参数；准备失败同步传播，执行异常由 packaged_task 保存。
     auto invocation = [saved_function = std::forward<F>(function),
                        saved_arguments = std::tuple<std::decay_t<Args>...>(
                            std::forward<Args>(args)...)]() mutable -> result_type {

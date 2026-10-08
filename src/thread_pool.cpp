@@ -147,6 +147,6 @@ void work_thread::run() {
         }
 
         (*task)(); // 用户异常由 packaged_task 保存，worker 继续循环。
-        task.reset(); // 用户对象在锁外销毁，再进入下一轮领取。
+        task.reset(); // 锁外释放 Task；future 仍可能延长用户捕获的生命周期。
     }
 }

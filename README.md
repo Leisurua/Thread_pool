@@ -1,59 +1,74 @@
 # C++20 固定 worker 数量线程池
 
-V1.0 目标是实现一个固定 worker 数量、使用 FIFO 队列的 C++20 线程池，提供任务提交、future 结果反馈及两种关闭方式。前三轮精简已完成并通过用户审核：异常反馈、快照进度移除及暂停恢复移除。
+一个使用无界 FIFO 队列的 C++20 线程池，支持泛型任务提交、`std::future` 结果反馈、优雅关闭和立即关闭。核心功能、37 项行为测试以及本机 Release 性能验证已完成。
 
-## 当前进度
+## 使用
 
-V1.0 核心功能开发已完成（模块 1 至 4），性能验证（模块 5）尚未开始；按包含可复现性能数据的项目完成标准，整体尚未全部完成。
+包含 `thread_pool.hpp`，并链接静态库目标 `thread_pool::thread_pool`：
 
-已实现 `Task` 类型擦除、`std::packaged_task` 原异常反馈、`submit()`、work_thread 生命周期与 worker 循环、worker 身份判定，并配置头文件编译检查及 submit、真实 worker、生命周期三项行为测试。任务 ID、快照等待与 set 进度登记已删除；未执行 Task 销毁通过 future 反馈 `broken_promise`。
+```cmake
+add_subdirectory(path/to/thread_pool_project)
+target_link_libraries(your_app PRIVATE thread_pool::thread_pool)
+```
 
-线程池构造、优雅析构及两种显式关闭均已实现，可直接链接使用。默认数量沿用 `default_worker_count()`，部分 worker 创建失败时通知并回收已创建线程。`shutdown()`、`shutdown_now()` 与共用 `stop()` 位于 `src/thread_pool.cpp`；关闭锁 `shutdown_mutex_` 串行化整个关闭，队列锁 `queue_mutex_` 保护状态及任务队列；其他关闭调用者等待关闭锁，不升级方式。立即关闭在队列锁外销毁未领取任务，所有关闭均等待 worker 退出。三个测试已删除生命周期/stop 定义桩。前三轮审核记录见 [REVIEW.md](docs/REVIEW.md)。
+```cpp
+#include "thread_pool.hpp"
 
-V1.0 不包含有界队列、动态 worker 数量或 work-stealing。FIFO 保证任务领取顺序，不保证多个 worker 实际进入 callable 或完成任务的顺序。
+int main() {
+    thread_pool pool(2);
+    auto result = pool.submit([](int a, int b) { return a + b; }, 3, 4);
+    return result.get() == 7 ? 0 : 1;
+} // 析构时优雅关闭，排空队列并等待所有 worker 退出。
+```
 
-## 构建与检查
+省略 worker 数量时使用硬件并发数，无法获取时采用 1；显式传入 0 抛 `std::invalid_argument`。callable 和参数按值保存，借用对象使用 `std::ref` / `std::cref`，并由调用方保证其生命周期。
 
-本机目标环境为 Windows / MSYS2 UCRT64，使用 GNU GCC 16.2.0、CMake 和 Ninja。语言标准为 C++20，禁用 GNU 扩展；默认构建类型为 Debug。
+任务异常由对应的 `future.get()` 按原类型反馈。`shutdown()` 排空队列；`shutdown_now()` 丢弃尚未领取的任务，其 future 反馈 `broken_promise`。两种关闭都会等待已领取任务和所有 worker 结束，支持池外线程并发或重复调用，首次生效的关闭方式保持到底。
 
-在项目根目录执行：
+FIFO 保证领取顺序，不保证多个 worker 的调用开始或完成顺序。本池 worker 调用本池关闭接口抛 `std::logic_error`。析构前须结束其他线程对池的访问。完整规则见 [API 契约](docs/API.md)。
+
+本版本不包含动态 worker、有界队列、任务窃取、优先级、暂停恢复、单任务取消或全池等待接口。
+
+## 构建与验证
+
+本机环境为 Windows / MSYS2 UCRT64、GNU GCC 16.2.0、CMake 3.25 及以上、Ninja。项目使用 C++20，禁用 GNU 扩展；默认构建为 Debug。在项目根目录运行：
 
 ```powershell
 cmake --preset ucrt64-debug
 cmake --build --preset ucrt64-debug
+# 独立运行 CTest 时需要 UCRT64 运行库目录。
+$env:PATH = "C:/msys64/ucrt64/bin;$env:PATH"
 ctest --test-dir build/ucrt64-debug --output-on-failure
 ```
 
-预设指定 `C:/msys64/ucrt64/bin/g++.exe` 和 `C:/msys64/ucrt64/bin/ninja.exe`，并检查 GCC 版本。构建产物位于 `build/ucrt64-debug/`，预设仅为构建进程设置 PATH。备用 Release 预设为 `ucrt64-release`。
+预设指定 `C:/msys64/ucrt64/bin/g++.exe` 和 `C:/msys64/ucrt64/bin/ninja.exe`，检查 GCC 版本；产物位于 `build/ucrt64-debug/`。预设和上述 PATH 设置均不修改系统环境。编辑器与工具链说明见 [本机开发约定](CLAUDE.md)。
 
-当前构建为静态库，使用方须链接 CMake 目标 `thread_pool::thread_pool`，包含头文件本身不足以链接 worker 实现。独立运行测试时的 UCRT64 运行库环境见 [本机开发说明](CLAUDE.md)。
+构建包含独立/重复包含头文件检查；CTest 包含基础执行 5 项、优雅关闭 6 项、立即关闭 6 项、关闭竞争与自等待 6 项、生命周期与异常安全 12 项，以及 submit 和真实 worker 两项回归，共 37 项。覆盖范围和未触发路径见 [实现与验证记录](docs/IMPLEMENTATION.md)。
 
-## 项目结构
+## 性能复现
 
-```text
-thread_pool_project/
-├── include/thread_pool.hpp   # 接口声明及 Task、submit 准备任务、worker 生命周期实现
-├── src/thread_pool.cpp       # 池构造/析构、关闭流程、私有 enqueue 及 worker 的 run，编译为静态库
-├── tests/submit_test.cpp     # 回收 worker 后同步驱动 submit 的行为测试
-├── tests/worker_test.cpp     # 使用产品关闭接口的真实 worker 行为测试
-├── tests/lifecycle_test.cpp  # 产品生命周期、并发关闭、重入及失败回收测试
-├── docs/
-│   ├── API.md                # 调用契约与异常接口
-│   ├── DESIGN.md             # 状态、同步和内部任务结构
-│   └── IMPLEMENTATION.md     # 实现进度、后续要求和验证范围
-├── CMakeLists.txt
-├── CMakePresets.json
-├── AGENTS.md                 # 开发代理约定
-└── CLAUDE.md                 # 本机构建与编辑器说明
+```powershell
+cmake --preset ucrt64-release
+cmake --build --preset ucrt64-release
+& ./benchmarks/run.ps1 -Rounds 10
+& ./benchmarks/run.ps1 -Suite advanced -Rounds 10
 ```
 
-## 文档导航
+Release 预设启用独立基准，基准不加入 CTest。基础组 42 个配置、扩展组 84 个配置，各有预热及至少 10 次正式测量；扩展覆盖任务粒度、入队与消费分离、积压立即关闭。原始 CSV、环境、源码哈希和波动统计保存在 `benchmarks/results/`。
 
-| 文档 | 内容 |
+性能数字只适用于记录中的机器和负载；平均提交、完整批次吞吐、反馈观察及关闭等待使用不同计时边界。方法与本机实测结果见 [性能记录](docs/PERFORMANCE.md)。
+
+## 项目结构与文档
+
+| 路径 | 内容 |
 | --- | --- |
-| [API.md](docs/API.md) | 构造、提交、关闭、future 与异常反馈规则 |
-| [DESIGN.md](docs/DESIGN.md) | 状态转换、并发边界、类型擦除、提交流程与模块精简 |
-| [IMPLEMENTATION.md](docs/IMPLEMENTATION.md) | 已实现和待实现清单、构建目标及测试边界 |
-| [CLAUDE.md](CLAUDE.md) | 工具链、clangd 配置及构建约定 |
-
-文档中的“待实现”表示规则已确定、代码尚未完成；“待确认”表示仍需作出设计决定。具体实现状态以代码和 [实现进度](docs/IMPLEMENTATION.md) 为准。
+| [include/thread_pool.hpp](include/thread_pool.hpp) | 公共接口、Task 类型擦除、submit 模板与 worker 生命周期 |
+| [src/thread_pool.cpp](src/thread_pool.cpp) | 池构造/析构、关闭流程、enqueue 与 worker 循环 |
+| [tests/](tests/) | 行为测试、受控同步与异常安全验证 |
+| [benchmarks/](benchmarks/) | Release 基准、运行/汇总脚本与历史实测记录 |
+| [API.md](docs/API.md) | 调用语义、关闭边界与异常反馈 |
+| [DESIGN.md](docs/DESIGN.md) | 状态、锁职责、任务所有权与生命周期 |
+| [IMPLEMENTATION.md](docs/IMPLEMENTATION.md) | 实现状态、测试范围与历史实施记录 |
+| [PERFORMANCE.md](docs/PERFORMANCE.md) | 性能方法、计时边界与实测数据 |
+| [REVIEW.md](docs/REVIEW.md) | 前三轮精简的审核历史 |
+| [CLAUDE.md](CLAUDE.md) / [AGENTS.md](AGENTS.md) | 本机开发环境与代理约定 |

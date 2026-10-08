@@ -11,7 +11,7 @@
 | 构建工具 | CMake（项目最低要求 3.25）+ Ninja（`C:/msys64/ucrt64/bin/ninja.exe`） |
 | 语言标准 | C++20，禁用 GNU 扩展 |
 | 默认构建 | Debug，预设 `ucrt64-debug` |
-| 备用构建 | Release，预设 `ucrt64-release` |
+| 性能构建 | Release，预设 `ucrt64-release`，启用独立基准 |
 
 预设为构建进程前置 UCRT64 工具目录，不修改系统 PATH；不要求调用方预先配置全局工具链路径。CMake 本身需能从命令行调用。
 
@@ -22,18 +22,13 @@
 ```powershell
 cmake --preset ucrt64-debug
 cmake --build --preset ucrt64-debug
+$env:PATH = "C:/msys64/ucrt64/bin;$env:PATH"
 ctest --test-dir build/ucrt64-debug --output-on-failure
 ```
 
-构建目录固定为 `build/ucrt64-debug/`，生成 `compile_commands.json`。头文件检查验证独立编译和重复包含；submit、worker、lifecycle 三项测试均链接产品实现，无生命周期/stop 定义桩。submit 测试先关闭并回收 worker 后同步驱动队列，worker 测试使用产品关闭接口，生命周期测试覆盖并发关闭、负责人重入及失败回收。shutdown/shutdown_now/stop 均在 src/thread_pool.cpp 实现，析构复用 stop。shutdown_mutex_ 串行化关闭及回收，queue_mutex_ 保护状态、队列和负责人身份；不再使用 shutdown_complete_，并发调用者等待关闭锁。
+构建目录固定为 `build/ucrt64-debug/`，生成 `compile_commands.json`。构建验证头文件独立编译和重复包含；全部 37 项 CTest 链接产品实现，无生命周期/stop 定义桩。分组、用例与验证边界见 [IMPLEMENTATION.md](docs/IMPLEMENTATION.md)，内部锁职责见 [DESIGN.md](docs/DESIGN.md)。
 
-单独调用 ctest 或测试可执行文件时，它们继承当前终端环境，不会自动继承 configure/build 预设中的 PATH。若终端尚未包含 UCRT64 运行库目录，可在当前 PowerShell 会话中执行，再运行测试：
-
-```powershell
-$env:PATH = "C:/msys64/ucrt64/bin;$env:PATH"
-```
-
-该设置只影响当前会话及其子进程，不修改系统环境。
+单独调用 ctest 或测试可执行文件时，它们继承当前终端环境，不会自动继承 configure/build 预设中的 PATH。上述 PATH 设置为当前会话提供 UCRT64 运行库，只影响该会话及其子进程，不修改系统环境。Release 构建、基准运行和重新统计命令见 [PERFORMANCE.md](docs/PERFORMANCE.md)。
 
 ## clangd
 

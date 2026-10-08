@@ -62,7 +62,8 @@ struct submit_on_rejected_cleanup {
 };
 }
 
-void* operator new(std::size_t size) {
+// 避免 Release 内联替换分配器后误报 mismatched-new-delete，保持注入调用可观察。
+[[gnu::noinline]] void* operator new(std::size_t size) {
     if (count_allocations) {
         ++allocation_count;
     }
@@ -78,18 +79,18 @@ void* operator new(std::size_t size) {
     }
     throw std::bad_alloc{};
 }
-void* operator new[](std::size_t size) { return ::operator new(size); }
-void operator delete(void* memory) noexcept { std::free(memory); }
-void operator delete[](void* memory) noexcept { std::free(memory); }
-void operator delete(void* memory, std::size_t) noexcept { std::free(memory); }
-void operator delete[](void* memory, std::size_t) noexcept { std::free(memory); }
+[[gnu::noinline]] void* operator new[](std::size_t size) { return ::operator new(size); }
+[[gnu::noinline]] void operator delete(void* memory) noexcept { std::free(memory); }
+[[gnu::noinline]] void operator delete[](void* memory) noexcept { std::free(memory); }
+[[gnu::noinline]] void operator delete(void* memory, std::size_t) noexcept { std::free(memory); }
+[[gnu::noinline]] void operator delete[](void* memory, std::size_t) noexcept { std::free(memory); }
 
 struct thread_pool_test_access {
     static void exercise_submit(thread_pool& pool);
 };
 
 void thread_pool_test_access::exercise_submit(thread_pool& pool) {
-    // 使用产品构造/析构；先退出并回收 worker，再通过状态桩同步驱动 submit/Task。
+    // 先用公共接口回收 worker，再由友元恢复 RUNNING，同步驱动 submit/Task。
     pool.shutdown();
     pool.state_ = status_t::RUNNING;
 
