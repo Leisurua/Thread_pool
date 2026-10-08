@@ -10,10 +10,7 @@ void work_thread::run() {
         {
             std::unique_lock lock(pool_.mutex_);
             pool_.task_ready_.wait(lock, [this] {
-                return pool_.state_ == status_t::SHUTDOWN
-                    || pool_.state_ == status_t::SHUTDOWN_NOW
-                    || pool_.state_ == status_t::TERMINATED
-                    || (pool_.state_ == status_t::RUNNING && !pool_.tasks_.empty());
+                return pool_.state_ != status_t::RUNNING || !pool_.tasks_.empty();
             });
 
             if (pool_.state_ == status_t::SHUTDOWN_NOW
@@ -22,7 +19,7 @@ void work_thread::run() {
                 return;
             }
 
-            // 领取与状态检查共用主锁；领取后执行不会被暂停或立即关闭撤回。
+            // 领取与状态检查共用主锁；领取后执行不会被立即关闭撤回。
             task.emplace(std::move(pool_.tasks_.front()));
             pool_.tasks_.pop();
         }

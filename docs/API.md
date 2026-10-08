@@ -2,7 +2,7 @@
 
 [项目入口](../README.md) · [内部设计](DESIGN.md) · [实现进度与验证](IMPLEMENTATION.md)
 
-本文描述已确认精简方向及补充决定对应的目标契约。模块 1、2 已移除自定义异常、异常包装、cancel、取消标志、快照 wait、任务编号及进度登记，保留原异常反馈与未执行 Task 销毁时的 broken_promise；暂停与公共生命周期仍待后续模块迁移。
+本文描述已确认精简方向及补充决定对应的目标契约。模块 1 至 3 已移除自定义异常、异常包装、cancel、取消标志、快照 wait、任务编号、进度登记及暂停恢复，保留原异常反馈与未执行 Task 销毁时的 broken_promise。前三轮已通过用户审核，第三轮与 hpp 顺序整理一并纳入本次本地提交；公共生命周期仍待实现。
 
 当前已实现 Task、submit、work_thread 生命周期与 run、worker 身份判定、默认 worker 数量及精简后的异常反馈。池构造、析构、公共关闭仍只有声明，完整线程池尚不能直接使用。实际进度与现有测试边界见 [IMPLEMENTATION.md](IMPLEMENTATION.md)。
 
@@ -23,7 +23,7 @@ void shutdown();
 void shutdown_now();
 ```
 
-已删除池的 wait()/wait_result、任务 ID、历史取消记录、自定义异常体系及取消标志；pause()/resume() 和关闭升级仍待后续模块移除。future.wait()/get() 保留，用于各自任务的等待与取值；不增加替代性的全池等待或取消接口。
+已删除 pause()/resume()、池的 wait()/wait_result、任务 ID、历史取消记录、自定义异常体系及取消标志。公共关闭尚未实现，将采用首次关闭方式保持到底，不升级。future.wait()/get() 保留，用于各自任务的等待与取值；不增加替代性的全池等待或取消接口。
 
 暂不实现动态 worker、有界队列、任务窃取和优先级调度。
 
@@ -52,7 +52,7 @@ FIFO 保证主锁内领取顺序，不保证多个 worker 实际调用开始顺�
 
 本池 worker 内析构本池调用 std::terminate。关闭负责人在外层关闭尚未完成时重入析构本池也调用 std::terminate，不能销毁仍被外层关闭使用的对象。显式关闭接口的可捕获错误规则见第 6 节。
 
-## 4. submit 与 future（异常反馈与进度已精简，暂停状态待移除）
+## 4. submit 与 future（精简完成）
 
 ### 4.1 保存与调用语义
 
@@ -64,7 +64,7 @@ callable 和参数默认按值保存：左值复制、右值移动。执行时�
 
 ### 4.2 接受、拒绝与失败
 
-目标仅 RUNNING 接受新任务；当前仍保留 PAUSED 接受行为，待模块 3 删除。SHUTDOWN、SHUTDOWN_NOW 和 TERMINATED 均拒绝提交，已改为抛 std::runtime_error。
+仅 RUNNING 接受新任务；SHUTDOWN、SHUTDOWN_NOW 和 TERMINATED 均拒绝提交，抛 std::runtime_error。PAUSED 状态已删除。
 
 | 情况 | 目标结果 |
 | --- | --- |

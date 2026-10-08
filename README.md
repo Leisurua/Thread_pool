@@ -1,12 +1,12 @@
 # C++20 固定 worker 数量线程池
 
-V1.0 目标是实现一个固定 worker 数量、使用 FIFO 队列的 C++20 线程池，提供任务提交、future 结果反馈及两种关闭方式。精简已完成异常反馈和快照进度移除，下一模块移除暂停恢复。
+V1.0 目标是实现一个固定 worker 数量、使用 FIFO 队列的 C++20 线程池，提供任务提交、future 结果反馈及两种关闭方式。前三轮精简已完成并通过用户审核：异常反馈、快照进度移除及暂停恢复移除。
 
 ## 当前进度
 
 已实现 `Task` 类型擦除、`std::packaged_task` 原异常反馈、`submit()`、work_thread 生命周期与 worker 循环、worker 身份判定，并配置头文件编译检查、submit 与真实 worker 行为测试。任务 ID、快照等待与 set 进度登记已删除；未执行 Task 销毁通过 future 反馈 `broken_promise`。
 
-线程池构造、析构、`pause()`、`resume()`、`shutdown()` 和 `shutdown_now()` 仍只有声明，完整线程池尚不能直接使用。暂停相关声明和状态留待下一模块删除。测试通过专用池生命周期及状态桩驱动产品逻辑，不代表公共关闭流程已完成。
+线程池构造、析构、`shutdown()` 和 `shutdown_now()` 仍只有声明，完整线程池尚不能直接使用。暂停恢复接口与状态已删除。测试通过专用池生命周期及状态桩驱动产品逻辑，不代表公共关闭流程已完成。前三轮审核记录见 [REVIEW.md](docs/REVIEW.md)，后续逐步实现未完成功能。
 
 V1.0 不包含有界队列、动态 worker 数量或 work-stealing。FIFO 保证任务领取顺序，不保证多个 worker 实际进入 callable 或完成任务的顺序。
 

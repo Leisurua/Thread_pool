@@ -163,13 +163,7 @@ void thread_pool_test_access::exercise_submit(thread_pool& pool) {
     check_broken_promise(discarded_reference);
     assert(discarded_calls == 0);
 
-    // PAUSED 接受提交；三种关闭状态均拒绝，不入队。
-    pool.state_ = status_t::PAUSED;
-    auto paused = pool.submit([] { return 9; });
-    assert(paused.wait_for(std::chrono::seconds(0)) == std::future_status::timeout);
-    pool.state_ = status_t::RUNNING;
-    drain();
-    assert(paused.get() == 9);
+    // 仅 RUNNING 接受提交；三种关闭状态均拒绝，不入队。
     for (auto state : {status_t::SHUTDOWN, status_t::SHUTDOWN_NOW, status_t::TERMINATED}) {
         pool.state_ = state;
         bool rejected = false;

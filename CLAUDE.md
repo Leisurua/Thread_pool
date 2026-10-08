@@ -25,7 +25,7 @@ cmake --build --preset ucrt64-debug
 ctest --test-dir build/ucrt64-debug --output-on-failure
 ```
 
-构建目录固定为 `build/ucrt64-debug/`，生成 `compile_commands.json`。头文件检查目标验证独立编译和重复包含；submit 测试使用池生命周期桩，worker 测试通过池生命周期/状态桩驱动真实产品 worker。完整池生命周期及 pause/resume、关闭接口尚未实现；快照 wait 和任务进度登记已删除，下一模块移除暂停恢复。
+构建目录固定为 `build/ucrt64-debug/`，生成 `compile_commands.json`。头文件检查目标验证独立编译和重复包含；submit 测试使用池生命周期桩，worker 测试通过池生命周期/状态桩驱动真实产品 worker。完整池生命周期及关闭接口尚未实现；快照 wait、任务进度登记和暂停恢复已删除。前三轮已通过用户审核，第三轮与 hpp 顺序整理一并提交，之后逐步实现未完成功能。
 
 单独调用 ctest 或测试可执行文件时，它们继承当前终端环境，不会自动继承 configure/build 预设中的 PATH。若终端尚未包含 UCRT64 运行库目录，可在当前 PowerShell 会话中执行，再运行测试：
 
