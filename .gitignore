@@ -20,6 +20,9 @@ install_manifest.txt
 *.dll
 *.pdb
 *.ilk
+*.so
+*.so.*
+*.dylib
 
 # 编辑器 / 工具
 .vscode/
@@ -27,3 +30,23 @@ install_manifest.txt
 .cache/
 *.swp
 *~
+
+# 本地环境、凭据与系统文件
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db
+*.user
+
+# 本机开发配置和历史过程仅在本地保留。
+/.clangd
+/.gitattributes
+/AGENTS.md
+/CLAUDE.md
+/docs/history/
+
+# 新测量默认留在本地；两组归档用于公开性能复核。
+benchmarks/results/*/
+!benchmarks/results/baseline/
+!benchmarks/results/advanced/

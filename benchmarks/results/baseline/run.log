@@ -1,0 +1,79 @@
+Release; __cplusplus=202002; hardware_concurrency=24; rounds=10; shuffle_seed=20261008
+submit_100k: warmup complete
+submit_100k: round 1/10 complete
+submit_100k: round 2/10 complete
+submit_100k: round 3/10 complete
+submit_100k: round 4/10 complete
+submit_100k: round 5/10 complete
+submit_100k: round 6/10 complete
+submit_100k: round 7/10 complete
+submit_100k: round 8/10 complete
+submit_100k: round 9/10 complete
+submit_100k: round 10/10 complete
+throughput_10k: warmup complete
+throughput_10k: round 1/10 complete
+throughput_10k: round 2/10 complete
+throughput_10k: round 3/10 complete
+throughput_10k: round 4/10 complete
+throughput_10k: round 5/10 complete
+throughput_10k: round 6/10 complete
+throughput_10k: round 7/10 complete
+throughput_10k: round 8/10 complete
+throughput_10k: round 9/10 complete
+throughput_10k: round 10/10 complete
+throughput_100k: warmup complete
+throughput_100k: round 1/10 complete
+throughput_100k: round 2/10 complete
+throughput_100k: round 3/10 complete
+throughput_100k: round 4/10 complete
+throughput_100k: round 5/10 complete
+throughput_100k: round 6/10 complete
+throughput_100k: round 7/10 complete
+throughput_100k: round 8/10 complete
+throughput_100k: round 9/10 complete
+throughput_100k: round 10/10 complete
+cpu: warmup complete
+cpu: round 1/10 complete
+cpu: round 2/10 complete
+cpu: round 3/10 complete
+cpu: round 4/10 complete
+cpu: round 5/10 complete
+cpu: round 6/10 complete
+cpu: round 7/10 complete
+cpu: round 8/10 complete
+cpu: round 9/10 complete
+cpu: round 10/10 complete
+close_idle: warmup complete
+close_idle: round 1/10 complete
+close_idle: round 2/10 complete
+close_idle: round 3/10 complete
+close_idle: round 4/10 complete
+close_idle: round 5/10 complete
+close_idle: round 6/10 complete
+close_idle: round 7/10 complete
+close_idle: round 8/10 complete
+close_idle: round 9/10 complete
+close_idle: round 10/10 complete
+close_partial: warmup complete
+close_partial: round 1/10 complete
+close_partial: round 2/10 complete
+close_partial: round 3/10 complete
+close_partial: round 4/10 complete
+close_partial: round 5/10 complete
+close_partial: round 6/10 complete
+close_partial: round 7/10 complete
+close_partial: round 8/10 complete
+close_partial: round 9/10 complete
+close_partial: round 10/10 complete
+close_all: warmup complete
+close_all: round 1/10 complete
+close_all: round 2/10 complete
+close_all: round 3/10 complete
+close_all: round 4/10 complete
+close_all: round 5/10 complete
+close_all: round 6/10 complete
+close_all: round 7/10 complete
+close_all: round 8/10 complete
+close_all: round 9/10 complete
+close_all: round 10/10 complete
+All 462 samples validated (warmup included)

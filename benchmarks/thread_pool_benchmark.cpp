@@ -132,7 +132,7 @@ sample close_sample(const config& cfg) {
     return result;
 }
 
-sample paused_sample(const config& cfg) {
+sample blocked_consumption_sample(const config& cfg) {
     std::latch entered(static_cast<std::ptrdiff_t>(cfg.workers)), release(1);
     thread_pool pool(cfg.workers);
     warm_workers(pool, cfg.workers);
@@ -157,7 +157,7 @@ sample paused_sample(const config& cfg) {
     result.total_ns = ns_between(begin, completed);
     for (auto& future : blockers) { future.get(); }
     pool.shutdown();
-    require(result.checksum == cfg.expected, "paused checksum mismatch");
+    require(result.checksum == cfg.expected, "blocked consumption checksum mismatch");
     return result;
 }
 
@@ -241,7 +241,7 @@ void run_suite(std::ofstream& csv, std::vector<config> configs, int rounds,
     auto measure = [&](const config& cfg) {
         if (cfg.suite.starts_with("close_")) { return close_sample(cfg); }
         if (cfg.suite == "backlog") { return backlog_sample(cfg); }
-        if (cfg.implementation == "paused") { return paused_sample(cfg); }
+        if (cfg.implementation == "blocked_consumption") { return blocked_consumption_sample(cfg); }
         return task_sample(cfg);
     };
     for (const auto& cfg : configs) {
@@ -307,7 +307,7 @@ int main(int argc, char* argv[]) {
             std::vector<config> enqueue, backlog;
             for (const std::size_t tasks : {10000U, 100000U}) {
                 for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
-                    for (const std::string implementation : {"pool", "paused"}) {
+                    for (const std::string implementation : {"pool", "blocked_consumption"}) {
                         enqueue.push_back({"enqueue_" + std::to_string(tasks), implementation,
                             workers, tasks, workers, 0, benchmark_workloads::tiny,
                             reference(benchmark_workloads::tiny, tasks, 0)});

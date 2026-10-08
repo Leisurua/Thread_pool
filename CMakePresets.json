@@ -7,6 +7,34 @@
   },
   "configurePresets": [
     {
+      "name": "portable-base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "THREAD_POOL_WERROR": "ON",
+        "THREAD_POOL_BUILD_TESTS": "ON",
+        "THREAD_POOL_BUILD_EXAMPLES": "ON"
+      }
+    },
+    {
+      "name": "debug",
+      "displayName": "Debug (compiler from environment)",
+      "inherits": "portable-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release (compiler from environment)",
+      "inherits": "portable-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
       "name": "ucrt64-base",
       "hidden": true,
       "generator": "Ninja",
@@ -34,7 +62,7 @@
     {
       "name": "ucrt64-release",
       "displayName": "MSYS2 UCRT64 GCC · Release",
-      "description": "同环境下的 Release 构建（备用，默认仍是 Debug）",
+      "description": "本机 UCRT64 Release 构建，启用独立性能基准",
       "inherits": "ucrt64-base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
@@ -45,6 +73,14 @@
   ],
   "buildPresets": [
     {
+      "name": "debug",
+      "configurePreset": "debug"
+    },
+    {
+      "name": "release",
+      "configurePreset": "release"
+    },
+    {
       "name": "ucrt64-debug",
       "displayName": "构建 ucrt64-debug",
       "configurePreset": "ucrt64-debug"
@@ -53,6 +89,28 @@
       "name": "ucrt64-release",
       "displayName": "构建 ucrt64-release",
       "configurePreset": "ucrt64-release"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "debug",
+      "configurePreset": "debug",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "release",
+      "configurePreset": "release",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "ucrt64-debug",
+      "configurePreset": "ucrt64-debug",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "ucrt64-release",
+      "configurePreset": "ucrt64-release",
+      "output": { "outputOnFailure": true }
     }
   ]
 }

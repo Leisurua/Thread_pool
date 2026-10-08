@@ -1,0 +1,67 @@
+{
+  "started_at": "2026-10-08T22:44:49.5566112+08:00",
+  "completed_at": "2026-10-08T22:45:08.2957459+08:00",
+  "rounds": 10,
+  "warmups_per_configuration": 1,
+  "shuffle_seed": 20261008,
+  "cpu_name": "Intel(R) Core(TM) i7-14650HX",
+  "logical_processors": 24,
+  "os_display_version": "25H2",
+  "os_build": "26200",
+  "os_ubr": 9457,
+  "power_scheme": "电源方案 GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (平衡)",
+  "affinity_and_priority": "OS defaults; no frequency pinning; background applications not stopped",
+  "compiler": "g++.exe (Rev4, Built by MSYS2 project) 16.2.0\nCopyright (C) 2026 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n",
+  "git_revision": "3b24ed77f0b2ee9863765376911db7de74c35385",
+  "git_status": [
+    " M AGENTS.md",
+    " M CLAUDE.md",
+    " M CMakeLists.txt",
+    " M CMakePresets.json",
+    " M README.md",
+    " M docs/DESIGN.md",
+    " M docs/IMPLEMENTATION.md",
+    " M tests/lifecycle_test.cpp",
+    " M tests/submit_test.cpp",
+    "?? benchmarks/",
+    "?? tests/basic_execution_test.cpp",
+    "?? tests/close_race_test.cpp",
+    "?? tests/shutdown_now_test.cpp",
+    "?? tests/shutdown_test.cpp"
+  ],
+  "build_commands": [
+    {
+      "directory": "D:/hsy258/thread_pool_project/build/ucrt64-release",
+      "command": "C:\\msys64\\ucrt64\\bin\\g++.exe -ID:/hsy258/thread_pool_project/include -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -Werror -o CMakeFiles\\thread_pool.dir\\src\\thread_pool.cpp.obj -c D:\\hsy258\\thread_pool_project\\src\\thread_pool.cpp",
+      "file": "D:/hsy258/thread_pool_project/src/thread_pool.cpp",
+      "output": "D:/hsy258/thread_pool_project/build/ucrt64-release/CMakeFiles/thread_pool.dir/src/thread_pool.cpp.obj"
+    },
+    {
+      "directory": "D:/hsy258/thread_pool_project/build/ucrt64-release",
+      "command": "C:\\msys64\\ucrt64\\bin\\g++.exe -DTHREAD_POOL_BENCHMARK_BUILD_TYPE=\\\"Release\\\" -ID:/hsy258/thread_pool_project/include -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -Werror -o CMakeFiles\\thread_pool_benchmark.dir\\benchmarks\\thread_pool_benchmark.cpp.obj -c D:\\hsy258\\thread_pool_project\\benchmarks\\thread_pool_benchmark.cpp",
+      "file": "D:/hsy258/thread_pool_project/benchmarks/thread_pool_benchmark.cpp",
+      "output": "D:/hsy258/thread_pool_project/build/ucrt64-release/CMakeFiles/thread_pool_benchmark.dir/benchmarks/thread_pool_benchmark.cpp.obj"
+    },
+    {
+      "directory": "D:/hsy258/thread_pool_project/build/ucrt64-release",
+      "command": "C:\\msys64\\ucrt64\\bin\\g++.exe -DTHREAD_POOL_BENCHMARK_BUILD_TYPE=\\\"Release\\\" -ID:/hsy258/thread_pool_project/include -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -Werror -o CMakeFiles\\thread_pool_benchmark.dir\\benchmarks\\workloads.cpp.obj -c D:\\hsy258\\thread_pool_project\\benchmarks\\workloads.cpp",
+      "file": "D:/hsy258/thread_pool_project/benchmarks/workloads.cpp",
+      "output": "D:/hsy258/thread_pool_project/build/ucrt64-release/CMakeFiles/thread_pool_benchmark.dir/benchmarks/workloads.cpp.obj"
+    }
+  ],
+  "source_sha256": {
+    "benchmarks/summarize.ps1": "6FE90DB8D21D9AFC43F1F9632E9E0038ACF137A946BC8F76A8009E8D755E82B9",
+    "benchmarks/thread_pool_benchmark.cpp": "6F3D430E5EAE61B1FB8AB88173242CE6AACD6E5A7828B3D9D461CF3EDD498794",
+    "benchmarks/workloads.hpp": "C777E414CB4B7EAB003ABC63838B4BC628543A5A94C12F6923C7FADAB3242C99",
+    "benchmarks/run.ps1": "86B710E8C8A201DA5F7FA1DC67CECFDFD5882FB01755D33B6F609EAFFDE16366",
+    "include/thread_pool.hpp": "412DB379190160494A349823F8A04BEE69A5BAE68A6BEB20D5C800E489AD3206",
+    "src/thread_pool.cpp": "B89ECAEE4EF57C4091C907CE4233CE917057C145E392D0C18420540B986E954F",
+    "benchmarks/workloads.cpp": "FBE66414AE9088E6A4708E4D71928609583C56E7069F64CCCE7E6B0C9C8F0525"
+  },
+  "executable_sha256": "C5EA800D61D62228AA983CA98074427AA84E6330B9C8755CD3BA9167DBE52067",
+  "analysis_script_sha256": "6B6277AABB5C82E530221705F482646CDFD6F8EF1E5221AC0339504EB6AFA83B",
+  "analysis_completed_at": "2026-10-08T22:50:07.7263578+08:00",
+  "samples_csv_sha256": "83810694F7F713264E406E9FCBDD4B0D3E2A8C4E17B11364410F2F6D876158D4",
+  "summary_csv_sha256": "02330AD54715038A252FC6FC9C3B878B6DE1B6F602B3FC0E998410CD14394CDD",
+  "report_md_sha256": "63E3AD2A49D75325D7917FDF9F4872DEC39EC8D5D9296B50011F27CAB4F46160"
+}

@@ -1,8 +1,8 @@
 # 性能测试方法与记录
 
-[项目入口](../README.md) · [API 契约](API.md) · [内部设计](DESIGN.md) · [实现与验证](IMPLEMENTATION.md)
+[项目入口](../README.md) · [内部设计](DESIGN.md)
 
-本基准只接受 Release 构建，使用固定计算负载和运行期校验值。实测表格、每轮原始数据、环境与实际编译参数分别保存在 `benchmarks/results/<时间>/report.md`、`samples.csv`、`environment.json` 中，汇总统计为 `summary.csv`。历史运行目录不覆盖。
+本基准只接受 Release 构建，使用固定计算负载和运行期校验值。基础组与扩展组的公开归档分别位于 `benchmarks/results/baseline/` 和 `benchmarks/results/advanced/`，包含实测报告 `report.md`、每轮原始数据 `samples.csv`、汇总统计 `summary.csv`、环境与实际编译参数 `environment.json` 及运行日志 `run.log`。两组归档仅调整目录名称，文件内容保持原样。后续运行默认保存到本地 `benchmarks/results/<时间>/`，不覆盖归档。
 
 ## 复现
 
@@ -18,11 +18,11 @@ ctest --test-dir build/ucrt64-release --output-on-failure
 & ./benchmarks/run.ps1 -Suite advanced -Rounds 10
 ```
 
-Release 预设启用 `THREAD_POOL_BUILD_BENCHMARKS`，生成 `thread_pool_benchmark.exe`；默认 Debug 不构建基准。基准运行时同时检查 `Release` 和 `NDEBUG`，拒绝少于 10 次正式测量。脚本临时使用项目 UCRT64 PATH，结束后恢复，不修改系统设置。仅重新统计已有完整记录可运行：
+Release 预设启用 `THREAD_POOL_BUILD_BENCHMARKS`，生成 `thread_pool_benchmark.exe`；默认 Debug 不构建基准。基准运行时同时检查 `Release` 和 `NDEBUG`，拒绝少于 10 次正式测量。脚本临时使用项目 UCRT64 PATH，结束后恢复，不修改系统设置。重新统计历史记录时先复制到新目录，再运行以下命令；汇总会重写副本的报告、统计和环境哈希，不应直接对归档运行：
 
 ```powershell
 & ./benchmarks/summarize.ps1 -ResultsDirectory <结果目录>
-# 扩展组已有记录
+# 扩展组已有记录；历史归档先复制到新目录，再传入副本路径
 & ./benchmarks/summarize_advanced.ps1 -ResultsDirectory <结果目录>
 ```
 
@@ -56,7 +56,7 @@ Release 预设启用 `THREAD_POOL_BUILD_BENCHMARKS`，生成 `thread_pool_benchm
 
 ## 结果适用范围
 
-极短任务主要反映调度与共享队列竞争；直接串行执行很可能更快，多 worker 也不保证更高吞吐。CPU 数据只代表此整数递推负载与本机配置，不能推断所有业务任务的加速比。简历引用应同时说明 Release、CPU、负载、worker 数、10 轮中位数及波动；不得用 Debug 结果，也不得将端到端吞吐换名为纯提交速度。
+极短任务主要反映调度与共享队列竞争；直接串行执行很可能更快，多 worker 也不保证更高吞吐。CPU 数据只代表此整数递推负载与本机配置，不能推断所有业务任务的加速比。引用结果应同时说明 Release、CPU、负载、worker 数、10 轮中位数及波动；不得用 Debug 结果，也不得将端到端吞吐换名为纯提交速度。
 
 ## 实测记录
 
@@ -66,13 +66,13 @@ Release 预设启用 `THREAD_POOL_BUILD_BENCHMARKS`，生成 `thread_pool_benchm
 
 任务粒度：固定 6,553,600 次整数递推，单任务由 32 增至 65,536 次（12 个倍增点），任务数由 204,800 降至 100。每个点比较串行及 1/2/4/8 worker。固定的是总递推操作数，分段后的输入和依赖链不同；同一粒度的所有执行方式校验值完全一致。记录相对单 worker 和串行的中位数比值，以及串行每任务摊销时间。交叉区间由相邻扫描点界定，不视为普适精确阈值；另记录多 worker 最大耗时低于单 worker 最小耗时的首个点，帮助区分中位数领先和完整样本区间分离。
 
-入队分离：1 万/10 万个相同极短 callable，1/2/4/8 worker。`pool` 正常并发消费；`paused` 先让每个 worker 领取 latch 阻塞任务，确认全部进入后开始提交计时，提交完才放行。容器 reserve、建池、受控任务提交均在计时外。批量提交仍包含公开 submit 内部对象准备及 future 保存；放行后的消费和 get 合并计时，不能称为纯执行成本。两模式的差值包含竞争、调度与队列积压等效应，不能直接等同于单一加锁成本。
+入队分离：1 万/10 万个相同极短 callable，1/2/4/8 worker。`pool` 正常并发消费；`blocked_consumption` 先让每个 worker 领取 latch 阻塞任务，确认全部进入后开始提交计时，提交完才放行。历史 CSV 的 `paused` 是同一基准门控模式，原样保留，汇总脚本兼容旧标签；线程池没有暂停接口。容器 reserve、建池、受控任务提交均在计时外。批量提交仍包含公开 submit 内部对象准备及 future 保存；放行后的消费和 get 合并计时，不能称为纯执行成本。两模式的差值包含竞争、调度与队列积压等效应，不能直接等同于单一加锁成本。
 
 积压关闭：全部 worker 被受控任务占用，额外提交 1 万/10 万排队任务，独立线程调用 shutdown_now 并记录起止。观察线程记录首个 future 就绪和全部 future 就绪（逐项 wait，含遍历/调度），再释放已领取任务，记录放行至关闭返回及总时间。全部排队 callable 执行次数必须为零，每个 get 验证 broken_promise，已领取任务结果必须正确。关闭后单独记录异常 get/释放 future 的耗时；future 句柄保留共享状态时，用户 capture 可能在 get 阶段才被释放。全反馈时间是可观察上界，关闭总时间含人为门控等待，不能称为内部队列销毁的纯耗时；本负载不包含大 capture 或昂贵用户析构。原始样本核对全反馈+放行至返回=关闭总时间。
 
 ### 基础组
 
-2026-10-08 首次完整测量：[完整报告](../benchmarks/results/20261008-224449/report.md) · [原始数据](../benchmarks/results/20261008-224449/samples.csv) · [汇总与波动](../benchmarks/results/20261008-224449/summary.csv) · [环境与编译命令](../benchmarks/results/20261008-224449/environment.json)。CPU 为 i7-14650HX，24 个逻辑处理器，Windows 25H2 build 26200.9457，平衡电源方案；GCC 16.2.0，`-O3 -DNDEBUG -std=c++20`，无 LTO。
+2026-10-08 首次完整测量：[完整报告](../benchmarks/results/baseline/report.md) · [原始数据](../benchmarks/results/baseline/samples.csv) · [汇总与波动](../benchmarks/results/baseline/summary.csv) · [环境与编译命令](../benchmarks/results/baseline/environment.json)。CPU 为 i7-14650HX，24 个逻辑处理器，Windows 25H2 build 26200.9457，平衡电源方案；GCC 16.2.0，`-O3 -DNDEBUG -std=c++20`，无 LTO。
 
 CPU 批次结果（10 次正式测量，中位数及完整范围）：
 
@@ -92,7 +92,7 @@ CPU 批次结果（10 次正式测量，中位数及完整范围）：
 
 ### 扩展组实测
 
-2026-10-08 同机 Release 完成 84 组各十轮，共 840 条正式记录及 84 条预热：[完整报告](../benchmarks/results/20261008-230549/report.md) · [原始数据](../benchmarks/results/20261008-230549/samples.csv) · [汇总与波动](../benchmarks/results/20261008-230549/summary.csv) · [环境](../benchmarks/results/20261008-230549/environment.json)。280 项统计各含十个样本，积压任务全部验证零执行及 broken_promise。
+2026-10-08 同机 Release 完成 84 组各十轮，共 840 条正式记录及 84 条预热：[完整报告](../benchmarks/results/advanced/report.md) · [原始数据](../benchmarks/results/advanced/samples.csv) · [汇总与波动](../benchmarks/results/advanced/summary.csv) · [环境](../benchmarks/results/advanced/environment.json)。280 项统计各含十个样本，积压任务全部验证零执行及 broken_promise。
 
 | 多 worker | 上一个未领先扫描点 | 首个领先扫描点 | 首个领先点的串行每任务摊销 | 相对单 worker 中位数加速比 |
 | --- | --- | --- | --- | --- |
@@ -102,6 +102,6 @@ CPU 批次结果（10 次正式测量，中位数及完整范围）：
 
 这些首个领先点的多 worker 最大耗时均低于单 worker 最小耗时，所有更大扫描点也继续领先。扫描只能界定相邻点之间的交叉区间，不插值声称更精确的阈值。领先单 worker 不等于超过直接串行；2/4/8 worker 首次超过串行均为 2048 次（串行摊销 3.669 μs），该点各自最大耗时也均低于串行最小耗时。
 
-10 万极短任务暂停消费时，1/2/4/8 worker 的平均提交耗时中位数分别为 0.448/0.443/0.448/0.442 μs；并发消费时为 0.632/0.545/0.548/0.553 μs。暂停消费的批量提交更快，但放行后再执行使完整批次更慢，不能把暂停模式的入队成本替换成端到端吞吐。
+10 万极短任务阻塞消费时，1/2/4/8 worker 的平均提交耗时中位数分别为 0.448/0.443/0.448/0.442 μs；并发消费时为 0.632/0.545/0.548/0.553 μs。阻塞消费的批量提交更快，但放行后再执行使完整批次更慢，不能把该门控模式的入队成本替换成端到端吞吐。
 
 10 万积压任务的全部 future 就绪观察中位数为 17.841/18.420/17.597/18.336 ms（1/2/4/8 worker），关闭总时间为 18.017/18.615/17.833/18.710 ms；随后异常 get/释放 future 分别为 199.706/198.647/199.518/201.597 ms。反馈观察、关闭门控与消费者异常读取/共享状态清理分列，不混成裸队列销毁时间。1 万积压数据及每轮波动见完整报告。Release 完整 CTest 37/37 通过，产品源码未修改。

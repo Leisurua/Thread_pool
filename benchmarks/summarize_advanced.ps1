@@ -6,6 +6,10 @@ if (-not $metadata.completed_at -or $metadata.suite -ne 'advanced') { throw 'Com
 $metadata.started_at = ([DateTimeOffset]$metadata.started_at).ToOffset([TimeSpan]::FromHours(8)).ToString('o')
 $metadata.completed_at = ([DateTimeOffset]$metadata.completed_at).ToOffset([TimeSpan]::FromHours(8)).ToString('o')
 $all = @(Import-Csv -LiteralPath (Join-Path $ResultsDirectory 'samples.csv'))
+# 兼容历史标签，仅规范化内存中的分析记录，不改写原始 CSV。
+foreach ($row in $all) {
+    if ($row.implementation -eq 'paused') { $row.implementation = 'blocked_consumption' }
+}
 $measured = @($all | Where-Object phase -eq 'measured')
 $groups = @($measured | Group-Object suite, implementation, workers, tasks, busy, iterations)
 if ($groups.Count -ne 84 -or $measured.Count -ne 84 * $metadata.rounds -or $all.Count -ne 84 * ($metadata.rounds + 1)) { throw 'Missing configurations/samples' }
@@ -126,11 +130,11 @@ $report.Add('以上是离散扫描点的交叉区间，包含批次数量、调�
 $report.Add('')
 $report.Add('## 入队与消费分离')
 $report.Add('')
-$report.Add('相同极短 callable：pool 为 worker 并发消费，paused 为每个 worker 被受控任务占用。paused 在全部提交返回之后放行；入队期间没有基准任务执行。submit 含公开接口准备、分配、锁、通知和 future 保存，不含 get；collect 含放行、消费及 get，pool 的 collect 不代表全部消费成本。受控任务、建池与容器 reserve 在计时外。')
+$report.Add('相同极短 callable：pool 为 worker 并发消费，blocked_consumption 为每个 worker 被受控任务占用，在全部提交返回之后放行；入队期间没有基准任务执行。这是基准门控，不是产品暂停接口；历史 paused 标签按同一模式分析，原始 CSV 不变。submit 含公开接口准备、分配、锁、通知和 future 保存，不含 get；collect 含放行、消费及 get，pool 的 collect 不代表全部消费成本。受控任务、建池与容器 reserve 在计时外。')
 $report.Add('')
 $report.Add('| 任务数 | worker | 模式 | submit ms | μs/submit | submit 后至结果收齐 ms | 整批 ms |')
 $report.Add('| --- | --- | --- | --- | --- | --- | --- |')
-foreach ($tasks in @(10000,100000)) { foreach ($workers in @(1,2,4,8)) { foreach ($mode in @('pool','paused')) {
+foreach ($tasks in @(10000,100000)) { foreach ($workers in @(1,2,4,8)) { foreach ($mode in @('pool','blocked_consumption')) {
     $suite="enqueue_$tasks"
     $report.Add("| $tasks | $workers | $mode | $(Cell (Lookup $suite $mode $workers submit_ms)) | $(Cell (Lookup $suite $mode $workers avg_submit_us)) | $(Cell (Lookup $suite $mode $workers collect_ms)) | $(Cell (Lookup $suite $mode $workers total_ms)) |")
 } } }

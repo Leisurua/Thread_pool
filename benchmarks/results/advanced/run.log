@@ -1,0 +1,35 @@
+Release; __cplusplus=202002; hardware_concurrency=24; rounds=10; shuffle_seed=20261008
+grain_32: warmup complete
+grain_32768: round 1/10 complete
+grain_1024: round 2/10 complete
+grain_16384: round 3/10 complete
+grain_512: round 4/10 complete
+grain_4096: round 5/10 complete
+grain_128: round 6/10 complete
+grain_4096: round 7/10 complete
+grain_128: round 8/10 complete
+grain_8192: round 9/10 complete
+grain_32768: round 10/10 complete
+enqueue_10000: warmup complete
+enqueue_10000: round 1/10 complete
+enqueue_10000: round 2/10 complete
+enqueue_10000: round 3/10 complete
+enqueue_100000: round 4/10 complete
+enqueue_10000: round 5/10 complete
+enqueue_10000: round 6/10 complete
+enqueue_10000: round 7/10 complete
+enqueue_100000: round 8/10 complete
+enqueue_10000: round 9/10 complete
+enqueue_100000: round 10/10 complete
+backlog: warmup complete
+backlog: round 1/10 complete
+backlog: round 2/10 complete
+backlog: round 3/10 complete
+backlog: round 4/10 complete
+backlog: round 5/10 complete
+backlog: round 6/10 complete
+backlog: round 7/10 complete
+backlog: round 8/10 complete
+backlog: round 9/10 complete
+backlog: round 10/10 complete
+All 924 samples validated (warmup included)

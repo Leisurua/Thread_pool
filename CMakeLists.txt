@@ -17,7 +17,7 @@ endif()
 
 # --- 构建类型 ---------------------------------------------------------------
 # 单配置生成器未显式指定构建类型时默认 Debug。
-if(NOT CMAKE_CONFIGURATION_TYPES)
+if(PROJECT_IS_TOP_LEVEL AND NOT CMAKE_CONFIGURATION_TYPES)
     if(NOT CMAKE_BUILD_TYPE)
         set(CMAKE_BUILD_TYPE Debug CACHE STRING "构建类型" FORCE)
     endif()
@@ -31,7 +31,9 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-option(THREAD_POOL_WERROR "把编译警告视为错误" ON)
+option(THREAD_POOL_WERROR "把本项目编译警告视为错误" ${PROJECT_IS_TOP_LEVEL})
+option(THREAD_POOL_BUILD_TESTS "构建线程池行为测试" ${PROJECT_IS_TOP_LEVEL})
+option(THREAD_POOL_BUILD_EXAMPLES "构建使用示例" OFF)
 option(THREAD_POOL_BUILD_BENCHMARKS "构建独立 Release 性能基准" OFF)
 
 # --- 库 ---------------------------------------------------------------------
@@ -40,28 +42,19 @@ add_library(thread_pool STATIC src/thread_pool.cpp)
 add_library(thread_pool::thread_pool ALIAS thread_pool)
 
 target_include_directories(thread_pool PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:include>)
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
 
 target_compile_features(thread_pool PUBLIC cxx_std_20)
 
 find_package(Threads REQUIRED)
 target_link_libraries(thread_pool PUBLIC Threads::Threads)
 
-# 统一配置库及使用方的编译警告。
+# 警告仅用于本项目目标，不把 -Werror 等选项施加给使用方。
 if(MSVC)
     set(THREAD_POOL_WARNINGS /W4 /permissive-)
 else()
     set(THREAD_POOL_WARNINGS -Wall -Wextra -Wpedantic)
 endif()
-target_compile_options(thread_pool PUBLIC
-    "$<$<COMPILE_LANGUAGE:CXX>:${THREAD_POOL_WARNINGS}>")
-
-if(THREAD_POOL_WERROR)
-    target_compile_options(thread_pool PUBLIC
-        "$<$<COMPILE_LANGUAGE:CXX>:$<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Werror>>")
-endif()
-
 # 验证头文件能独立编译且可重复包含，不要求链接完整线程池实现。
 file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/thread_pool_header_check.cpp"
     CONTENT "#include \"thread_pool.hpp\"\n#include \"thread_pool.hpp\"\n")
@@ -69,7 +62,14 @@ add_library(thread_pool_header_check OBJECT
     "${CMAKE_CURRENT_BINARY_DIR}/thread_pool_header_check.cpp")
 target_link_libraries(thread_pool_header_check PRIVATE thread_pool::thread_pool)
 
-include(CTest)
+if(PROJECT_IS_TOP_LEVEL)
+    include(CTest)
+endif()
+
+if(THREAD_POOL_BUILD_EXAMPLES)
+    add_executable(thread_pool_example examples/basic.cpp)
+    target_link_libraries(thread_pool_example PRIVATE thread_pool::thread_pool)
+endif()
 if(THREAD_POOL_BUILD_BENCHMARKS)
     add_executable(thread_pool_benchmark
         benchmarks/thread_pool_benchmark.cpp benchmarks/workloads.cpp)
@@ -79,7 +79,8 @@ if(THREAD_POOL_BUILD_BENCHMARKS)
         THREAD_POOL_BENCHMARK_BUILD_TYPE="${CMAKE_BUILD_TYPE}")
 endif()
 
-if(BUILD_TESTING)
+if(THREAD_POOL_BUILD_TESTS AND (NOT DEFINED BUILD_TESTING OR BUILD_TESTING))
+    enable_testing()
     add_executable(thread_pool_basic_execution_test tests/basic_execution_test.cpp)
     target_link_libraries(thread_pool_basic_execution_test PRIVATE thread_pool::thread_pool)
     foreach(basic_case IN ITEMS workers exactly_once future_results move_only_and_ref exception_recovery)
@@ -139,3 +140,23 @@ if(BUILD_TESTING)
             TIMEOUT 30 LABELS lifecycle)
     endforeach()
 endif()
+
+# 对项目自己的库、头文件检查、示例、基准和测试使用相同的语言/警告要求。
+foreach(project_target IN ITEMS thread_pool thread_pool_header_check thread_pool_example
+        thread_pool_benchmark thread_pool_basic_execution_test thread_pool_shutdown_test
+        thread_pool_shutdown_now_test thread_pool_close_race_test thread_pool_submit_test
+        thread_pool_worker_test thread_pool_lifecycle_test)
+    if(TARGET ${project_target})
+        set_target_properties(${project_target} PROPERTIES
+            CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+        target_compile_options(${project_target} PRIVATE
+            "$<$<COMPILE_LANGUAGE:CXX>:${THREAD_POOL_WARNINGS}>")
+        if(THREAD_POOL_WERROR)
+            if(MSVC)
+                target_compile_options(${project_target} PRIVATE /WX)
+            else()
+                target_compile_options(${project_target} PRIVATE -Werror)
+            endif()
+        endif()
+    endif()
+endforeach()
