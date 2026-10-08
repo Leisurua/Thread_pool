@@ -7,6 +7,7 @@
 #include <cassert>
 #include <chrono>
 #include <latch>
+#include <string>
 
 using namespace std::chrono_literals;
 
@@ -51,7 +52,7 @@ struct thread_pool_test_access {
         pool.worker_threads_.clear();
     }
 
-    static void cancel_queued(thread_pool& pool) {
+    static void discard_queued(thread_pool& pool) {
         std::vector<thread_pool::Task> discarded;
         {
             std::lock_guard lock(pool.mutex_);
@@ -63,8 +64,7 @@ struct thread_pool_test_access {
         // 故意逆序反馈，验证最早丢弃 ID 不受完成顺序影响。
         while (!discarded.empty()) {
             const auto id = discarded.back().id();
-            discarded.back().cancel();
-            discarded.pop_back();
+            discarded.pop_back(); // 主锁外销毁未执行 Task，future 反馈 broken_promise。
             pool.finish_task(id, true);
         }
     }
@@ -78,7 +78,7 @@ struct thread_pool_test_access {
         }
         pool.task_ready_.notify_all();
         join(pool);
-        cancel_queued(pool);
+        discard_queued(pool);
     }
 };
 
@@ -96,6 +96,10 @@ thread_pool::~thread_pool() {
 }
 
 namespace {
+struct user_error : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
 void execution_and_identity() {
     thread_pool pool(1), other_pool(1);
     assert(!thread_pool_test_access::is_worker(pool));
@@ -104,15 +108,17 @@ void execution_and_identity() {
         assert(!thread_pool_test_access::is_worker(other_pool));
         return pool.submit([] { return 42; }); // 锁外执行，否则嵌套提交死锁。
     });
-    auto failure = pool.submit([]() -> int { throw std::runtime_error("task failed"); });
+    auto failure = pool.submit([]() -> int { throw user_error("task failed"); });
     auto after_failure = pool.submit([] { return 17; });
     thread_pool_test_access::set_state(pool, status_t::RUNNING);
     auto inner = nested.get();
     assert(inner.get() == 42);
-    bool wrapped = false;
+    bool original_error = false;
     try { (void)failure.get(); }
-    catch (const task_execution_error&) { wrapped = true; }
-    assert(wrapped && after_failure.get() == 17);
+    catch (const user_error& error) {
+        original_error = std::string(error.what()) == "task failed";
+    }
+    assert(original_error && after_failure.get() == 17);
     thread_pool_test_access::wait_processed(pool, 4);
     assert(thread_pool_test_access::unfinished(pool).empty());
 }
@@ -174,6 +180,18 @@ void destruction_outside_lock() {
     assert(destructor_result.valid() && destructor_result.get() == 9);
 }
 
+void discarded_destruction_outside_lock() {
+    thread_pool pool(1);
+    std::future<int> destructor_result;
+    auto probe = std::unique_ptr<submit_on_destroy>(new submit_on_destroy{pool, destructor_result});
+    auto result = pool.submit([owned = std::move(probe)] { assert(false); });
+    result = {}; // Task 持有最后一个共享状态引用，丢弃时确实触发用户析构。
+    thread_pool_test_access::discard_queued(pool);
+    assert(destructor_result.valid());
+    thread_pool_test_access::set_state(pool, status_t::RUNNING);
+    assert(destructor_result.get() == 9);
+}
+
 void graceful_shutdown_from_pause() {
     thread_pool pool(1);
     auto result = pool.submit([] { return 5; });
@@ -198,12 +216,15 @@ void immediate_shutdown_preserves_claimed_task() {
     assert(thread_pool_test_access::queued(pool) == 2);
     assert(thread_pool_test_access::unfinished(pool) == (std::set<std::uint64_t>{2, 3}));
     assert(thread_pool_test_access::first_cancelled(pool) == 0);
-    thread_pool_test_access::cancel_queued(pool);
+    thread_pool_test_access::discard_queued(pool);
     for (auto* result : {&second, &third}) {
-        bool cancelled = false;
+        assert(result->wait_for(0s) == std::future_status::ready);
+        bool discarded = false;
         try { result->get(); }
-        catch (const task_cancelled&) { cancelled = true; }
-        assert(cancelled);
+        catch (const std::future_error& error) {
+            discarded = error.code() == std::make_error_code(std::future_errc::broken_promise);
+        }
+        assert(discarded);
     }
     assert(thread_pool_test_access::unfinished(pool).empty());
     assert(thread_pool_test_access::first_cancelled(pool) == 2);
@@ -224,6 +245,7 @@ int main() {
     paused_and_fifo();
     out_of_order_completion();
     destruction_outside_lock();
+    discarded_destruction_outside_lock();
     graceful_shutdown_from_pause();
     immediate_shutdown_preserves_claimed_task();
     idle_workers_exit();

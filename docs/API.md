@@ -2,9 +2,9 @@
 
 [项目入口](../README.md) · [内部设计](DESIGN.md) · [实现进度与验证](IMPLEMENTATION.md)
 
-本文描述已确认精简方向及补充决定对应的目标契约。本轮仅同步文档，目标契约尚未迁移到源码；文档确认后再逐模块实现。当前源码仍有暂停、快照 wait、任务编号、取消标志和自定义异常，不能按本文假定这些行为已经改变。
+本文描述已确认精简方向及补充决定对应的目标契约。模块 1 已移除自定义异常、异常包装、cancel 和取消标志，保留原异常反馈与未执行 Task 销毁时的 broken_promise；暂停、快照 wait、任务编号与公共生命周期仍待后续模块迁移。
 
-当前已实现 Task、submit、work_thread 生命周期与 run、finish_task、worker 身份判定、默认 worker 数量及五种旧异常类型。池构造、析构、公共关闭仍只有声明，完整线程池尚不能直接使用。实际进度与现有测试边界见 [IMPLEMENTATION.md](IMPLEMENTATION.md)。
+当前已实现 Task、submit、work_thread 生命周期与 run、finish_task、worker 身份判定、默认 worker 数量及精简后的异常反馈。池构造、析构、公共关闭仍只有声明，完整线程池尚不能直接使用。实际进度与现有测试边界见 [IMPLEMENTATION.md](IMPLEMENTATION.md)。
 
 ## 1. 范围与目标接口
 
@@ -52,7 +52,7 @@ FIFO 保证主锁内领取顺序，不保证多个 worker 实际调用开始顺�
 
 本池 worker 内析构本池调用 std::terminate。关闭负责人在外层关闭尚未完成时重入析构本池也调用 std::terminate，不能销毁仍被外层关闭使用的对象。显式关闭接口的可捕获错误规则见第 6 节。
 
-## 4. submit 与 future（现有实现待精简）
+## 4. submit 与 future（异常反馈已精简，状态与编号待迁移）
 
 ### 4.1 保存与调用语义
 
@@ -64,7 +64,7 @@ callable 和参数默认按值保存：左值复制、右值移动。执行时�
 
 ### 4.2 接受、拒绝与失败
 
-仅 RUNNING 接受新任务；SHUTDOWN、SHUTDOWN_NOW 和 TERMINATED 均拒绝提交。
+目标仅 RUNNING 接受新任务；当前仍保留 PAUSED 接受行为，待模块 3 删除。SHUTDOWN、SHUTDOWN_NOW 和 TERMINATED 均拒绝提交，已改为抛 std::runtime_error。
 
 | 情况 | 目标结果 |
 | --- | --- |
@@ -72,7 +72,7 @@ callable 和参数默认按值保存：左值复制、右值移动。执行时�
 | 关闭生效先于入队 | 同步抛 std::runtime_error，不入队、不返回 future |
 | 准备、加锁或入队失败 | 同步传播原异常，不包装、不返回 future，任务未被接受 |
 
-锁外准备 callable、参数及 Task；锁内检查状态并入队。入队失败时队列中已有任务保持原状，不再登记或回滚 ID/set。已发生的输入移动不回滚，关闭拒绝也不保证输入保持原状；输入被移动不等于任务已接受。
+锁外准备 callable、参数及 Task；锁内检查状态并入队。入队失败时队列中已有任务保持原状；目标不再登记或回滚 ID/set，当前仍保留这部分逻辑，待模块 2 删除。已发生的输入移动不回滚，关闭拒绝也不保证输入保持原状；输入被移动不等于任务已接受。
 
 用户对象在准备阶段抛出的异常直接传播；即使类型也是 runtime_error，也不转换为另一种“提交失败”异常。调用 submit 前的参数表达式求值异常按普通 C++ 调用规则传播。
 
@@ -153,4 +153,4 @@ shutdown_now() 不强制中断已领取任务；“立即”不表示立即返�
 | worker_count 为 0 | 构造同步抛 std::invalid_argument |
 | worker 或关闭负责人重入析构本池 | std::terminate |
 
-以上均为精简目标；旧代码的异常类型和实际测试覆盖保留在 IMPLEMENTATION.md 的当前进度部分，待对应模块实现时更新。
+提交拒绝、准备/入队失败、任务异常和未执行 Task 销毁反馈已按模块 1 落实；公共关闭、构造及析构错误仍待生命周期模块接入。具体进度与实际测试覆盖见 IMPLEMENTATION.md。

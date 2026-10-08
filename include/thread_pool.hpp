@@ -4,7 +4,6 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
-#include <exception>
 #include <functional>
 #include <future>
 #include <limits>
@@ -26,49 +25,6 @@ enum class status_t : std::int8_t {
     RUNNING = 1,//正在运行
     PAUSED = 2, // 暂停
     SHUTDOWN = 3 // 优雅关闭中：继续执行排队任务，可升级为 SHUTDOWN_NOW
-};
-
-// 关闭生效后拒绝提交：submit 同步抛出，不返回 future。
-class submission_rejected : public std::exception {
-public:
-    const char* what() const noexcept override { return "thread pool submission rejected"; }
-};
-
-// 入队前的提交失败；保留原异常，查询操作不强制重抛。
-class submission_error : public std::exception {
-public:
-    explicit submission_error(std::exception_ptr original) noexcept
-        : original_(std::move(original)) {}
-    const char* what() const noexcept override { return "thread pool submission failed"; }
-    std::exception_ptr original_exception() const noexcept { return original_; }
-
-private:
-    std::exception_ptr original_;
-};
-
-// 已接受但未领取的任务被丢弃：通过 future.get() 反馈。
-class task_cancelled : public std::exception {
-public:
-    const char* what() const noexcept override { return "thread pool task cancelled"; }
-};
-
-// 任务函数调用失败；packaged_task 内部存储结果的异常保持原类型。
-class task_execution_error : public std::exception {
-public:
-    explicit task_execution_error(std::exception_ptr original) noexcept
-        : original_(std::move(original)) {}
-    const char* what() const noexcept override { return "thread pool task execution failed"; }
-    std::exception_ptr original_exception() const noexcept { return original_; }
-
-private:
-    std::exception_ptr original_;
-};
-
-// 仅保存调用错误消息；非法状态、并发 wait 和 worker 自等待由线程池判定。
-class thread_pool_call_error : public std::logic_error {
-public:
-    explicit thread_pool_call_error(const char* message)
-        : std::logic_error(message) {}
 };
 
 class thread_pool;
@@ -114,8 +70,8 @@ public:
     void resume();       // 恢复领取；重复恢复直接返回
     void shutdown();     // 阻塞优雅关闭，暂停不阻止排队任务执行
     void shutdown_now(); // 阻塞立即关闭，丢弃未领取任务，不中断已领取任务
-    // 关闭开始后 pause/resume 抛调用错误；并发关闭共用最终退出过程。
-    // 本池 worker 禁止调用两个关闭接口，须在状态变更前抛调用错误。
+    // 关闭开始后 pause/resume 抛 std::logic_error；并发关闭共用最终退出过程。
+    // 本池 worker 禁止调用两个关闭接口，须在状态变更前抛 std::logic_error。
 
     // 按值保存：左值复制、右值移动；借用须显式 std::ref/std::cref。
     // 保存的 callable 作为左值调用，保存的参数作为右值传入。
@@ -174,11 +130,9 @@ private:
     public:
         // packaged_task 与 submit 已取得的 future 继续关联同一个共享状态。
         template<class R>
-        Task(task_id_type id, std::packaged_task<R()>&& packaged_task,
-             std::shared_ptr<bool> cancelled)
+        Task(task_id_type id, std::packaged_task<R()>&& packaged_task)
             : id_(id),
-              task_(std::make_unique<model<R>>(
-                  std::move(packaged_task), std::move(cancelled))) {}
+              task_(std::make_unique<model<R>>(std::move(packaged_task))) {}
 
         ~Task() = default;
 
@@ -188,9 +142,9 @@ private:
         Task& operator=(Task&&) noexcept = default;
 
         // 原结果/异常保存在 packaged_task 的共享状态中，统一调用接口返回 void。
-        // 池保证执行/取消二选一且只调用一次，不对已移动的 Task 调用。
+        // 池保证仅执行一次或直接销毁，不对已移动的 Task 调用。
+        // 未执行 packaged_task 的销毁通过 future 反馈 broken_promise。
         void operator()() noexcept { task_->execute(); }
-        void cancel() noexcept { task_->cancel(); }
 
         task_id_type id() const noexcept { return id_; }
 
@@ -199,27 +153,19 @@ private:
         public:
             virtual ~base() = default;
             virtual void execute() noexcept = 0;
-            virtual void cancel() noexcept = 0;
         };
 
         // 模型只接管已构造的 packaged_task，不构造 callable、不获取 future。
         template<class R>
         class model final : public base {
         public:
-            model(std::packaged_task<R()>&& packaged_task, std::shared_ptr<bool> cancelled)
-                : packaged_task_(std::move(packaged_task)),
-                  cancelled_(std::move(cancelled)) {}
+            explicit model(std::packaged_task<R()>&& packaged_task)
+                : packaged_task_(std::move(packaged_task)) {}
 
             void execute() noexcept override { packaged_task_(); }
 
-            void cancel() noexcept override {
-                *cancelled_ = true;
-                packaged_task_(); // 只存入 task_cancelled，不调用原函数
-            }
-
         private:
             std::packaged_task<R()> packaged_task_;
-            std::shared_ptr<bool> cancelled_;
         };
 
         task_id_type id_;
@@ -233,7 +179,7 @@ private:
     void finish_task(task_id_type id, bool cancelled); // 记录进度并通知 wait
 
     // 状态、队列、快照进度与 wait/join 资格统一由此锁保护。
-    // callable、取消反馈、用户对象销毁与 worker join 在锁外。
+    // callable、丢弃反馈、用户对象销毁与 worker join 在锁外。
     std::mutex mutex_;
     std::condition_variable task_ready_;
     std::condition_variable progress_changed_;
@@ -285,69 +231,41 @@ auto thread_pool::submit(F&& function, Args&&... args)
     static_assert(!std::is_rvalue_reference_v<result_type>,
                   "thread_pool does not support rvalue-reference results");
 
-    // 分阶段包装失败，避免把用户对象构造时抛出的 submission_rejected 误判为池拒绝。
-    auto [task, future] = [&] {
-        try {
-            // 取消标志由 packaged_task 的 callable 与模型共享；执行/取消不并发。
-            auto cancelled = std::make_shared<bool>(false);
-            auto invocation = [saved_function = std::forward<F>(function),
-                               saved_arguments = std::tuple<std::decay_t<Args>...>(
-                                   std::forward<Args>(args)...),
-                               cancelled]() mutable -> result_type {
-                if (*cancelled) {
-                    throw task_cancelled{};
-                }
-                try {
-                    return std::apply(
-                        [&saved_function](auto&&... arguments) -> result_type {
-                            return std::invoke(
-                                saved_function,
-                                std::forward<decltype(arguments)>(arguments)...);
-                        },
-                        std::move(saved_arguments));
-                } catch (...) {
-                    throw task_execution_error(std::current_exception());
-                }
-            };
-
-            std::packaged_task<result_type()> packaged_task(std::move(invocation));
-            auto future = packaged_task.get_future();
-            Task task(0, std::move(packaged_task), std::move(cancelled));
-            return std::pair(std::move(task), std::move(future));
-        } catch (...) {
-            throw submission_error(std::current_exception());
-        }
-    }();
+    // 锁外准备；准备失败直接传播，用户异常由 packaged_task 存入 future。
+    auto invocation = [saved_function = std::forward<F>(function),
+                       saved_arguments = std::tuple<std::decay_t<Args>...>(
+                           std::forward<Args>(args)...)]() mutable -> result_type {
+        return std::apply(
+            [&saved_function](auto&&... arguments) -> result_type {
+                return std::invoke(
+                    saved_function, std::forward<decltype(arguments)>(arguments)...);
+            },
+            std::move(saved_arguments));
+    };
+    std::packaged_task<result_type()> packaged_task(std::move(invocation));
+    auto future = packaged_task.get_future();
+    Task task(0, std::move(packaged_task));
 
     // 锁比 task 后构造，异常退出时先解锁，再销毁用户函数和参数。
-    std::unique_lock<std::mutex> lock(mutex_, std::defer_lock);
-    try {
-        lock.lock();
-    } catch (...) {
-        throw submission_error(std::current_exception());
-    }
+    std::unique_lock lock(mutex_);
 
     if (state_ != status_t::RUNNING && state_ != status_t::PAUSED) {
-        throw submission_rejected{};
+        throw std::runtime_error("thread pool submission rejected");
     }
 
-    try {
-        if (last_accepted_id_ == std::numeric_limits<task_id_type>::max()) {
-            throw std::overflow_error("thread pool task ID exhausted");
-        }
-        const task_id_type id = last_accepted_id_ + 1;
-        task.id_ = id;
-        unfinished_tasks_.insert(id);
-        try {
-            tasks_.push(std::move(task));
-        } catch (...) {
-            unfinished_tasks_.erase(id);
-            throw;
-        }
-        last_accepted_id_ = id;
-    } catch (...) {
-        throw submission_error(std::current_exception());
+    if (last_accepted_id_ == std::numeric_limits<task_id_type>::max()) {
+        throw std::overflow_error("thread pool task ID exhausted");
     }
+    const task_id_type id = last_accepted_id_ + 1;
+    task.id_ = id;
+    unfinished_tasks_.insert(id);
+    try {
+        tasks_.push(std::move(task));
+    } catch (...) {
+        unfinished_tasks_.erase(id);
+        throw;
+    }
+    last_accepted_id_ = id;
 
     lock.unlock();
     task_ready_.notify_one();

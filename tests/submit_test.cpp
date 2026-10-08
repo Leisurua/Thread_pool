@@ -17,9 +17,13 @@ thread_local std::set<std::uint64_t>* watched_progress = nullptr;
 thread_local std::size_t progress_before_push = 0;
 thread_local bool fail_queue_allocation = false;
 
+struct user_error : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
 struct copy_failure {
     copy_failure() = default;
-    copy_failure(const copy_failure&) { throw submission_rejected{}; }
+    copy_failure(const copy_failure&) { throw user_error("copy failure"); }
     int operator()() & { return 0; }
 };
 
@@ -115,21 +119,18 @@ void thread_pool_test_access::exercise_submit(thread_pool& pool) {
     assert(&reference.get() == &target);
     assert(movable.get() == 7 && left.get() == 17);
 
-    // 原函数异常被包装，原异常对象仍可取得；后续任务继续执行。
-    auto failed = pool.submit([]() -> int { throw std::runtime_error("call failure"); });
+    // 原函数异常的动态类型与信息直接保留；后续任务继续执行。
+    auto failed = pool.submit([]() -> int { throw user_error("call failure"); });
     auto after_failure = pool.submit([] { return 42; });
     drain();
-    bool wrapped = false;
+    bool original_error = false;
     try { (void)failed.get(); }
-    catch (const task_execution_error& error) {
-        try { std::rethrow_exception(error.original_exception()); }
-        catch (const std::runtime_error& original) {
-            wrapped = std::string(original.what()) == "call failure";
-        }
+    catch (const user_error& error) {
+        original_error = std::string(error.what()) == "call failure";
     }
-    assert(wrapped && after_failure.get() == 42);
+    assert(original_error && after_failure.get() == 42);
 
-    // 方案 1：packaged_task 内部存储结果时抛出的异常保持原类型。
+    // packaged_task 内部存储结果时抛出的异常保持原类型。
     auto bad_storage = pool.submit([] { return storage_failure{}; });
     execute_one();
     bool original_storage_error = false;
@@ -139,18 +140,32 @@ void thread_pool_test_access::exercise_submit(thread_pool& pool) {
     }
     assert(original_storage_error);
 
-    int cancelled_calls = 0;
-    auto cancelled = pool.submit([&] { ++cancelled_calls; });
-    {
-        auto task = take();
-        task.cancel();
-        finish(task.id());
+    // 销毁未执行 Task，值/void/引用结果均应反馈 broken_promise，不运行 callable。
+    int discarded_calls = 0;
+    auto discarded_value = pool.submit([&] { ++discarded_calls; return 1; });
+    auto discarded_void = pool.submit([&] { ++discarded_calls; });
+    auto discarded_reference = pool.submit([&]() -> int& { ++discarded_calls; return target; });
+    for (int index = 0; index < 3; ++index) {
+        std::uint64_t id;
+        {
+            auto task = take();
+            id = task.id();
+        } // 锁外释放未执行 packaged_task，结果提供方放弃共享状态。
+        pool.finish_task(id, true);
     }
-    assert(cancelled.wait_for(std::chrono::seconds(0)) == std::future_status::ready);
-    bool cancellation_reported = false;
-    try { cancelled.get(); }
-    catch (const task_cancelled&) { cancellation_reported = true; }
-    assert(cancellation_reported && cancelled_calls == 0);
+    auto check_broken_promise = [](auto& result) {
+        assert(result.wait_for(std::chrono::seconds(0)) == std::future_status::ready);
+        bool reported = false;
+        try { (void)result.get(); }
+        catch (const std::future_error& error) {
+            reported = error.code() == std::make_error_code(std::future_errc::broken_promise);
+        }
+        assert(reported);
+    };
+    check_broken_promise(discarded_value);
+    check_broken_promise(discarded_void);
+    check_broken_promise(discarded_reference);
+    assert(discarded_calls == 0);
 
     // PAUSED 接受提交；三种关闭状态均拒绝，且不推进接受边界。
     pool.state_ = status_t::PAUSED;
@@ -164,22 +179,23 @@ void thread_pool_test_access::exercise_submit(thread_pool& pool) {
         const auto previous_id = pool.last_accepted_id_;
         bool rejected = false;
         try { (void)pool.submit([] { return 1; }); }
-        catch (const submission_rejected&) { rejected = true; }
+        catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()) == "thread pool submission rejected";
+        }
         assert(rejected && pool.last_accepted_id_ == previous_id);
         assert(pool.tasks_.empty() && pool.unfinished_tasks_.empty());
     }
     pool.state_ = status_t::RUNNING;
 
-    // 用户复制构造抛 submission_rejected 属于提交失败，不是池拒绝。
+    // 用户复制构造抛出的 runtime_error 派生异常保持类型与信息。
     copy_failure callable;
     const auto id_before_copy = pool.last_accepted_id_;
-    wrapped = false;
+    original_error = false;
     try { (void)pool.submit(callable); }
-    catch (const submission_error& error) {
-        try { std::rethrow_exception(error.original_exception()); }
-        catch (const submission_rejected&) { wrapped = true; }
+    catch (const user_error& error) {
+        original_error = std::string(error.what()) == "copy failure";
     }
-    assert(wrapped && pool.last_accepted_id_ == id_before_copy);
+    assert(original_error && pool.last_accepted_id_ == id_before_copy);
     assert(pool.tasks_.empty() && pool.unfinished_tasks_.empty());
 
     // 准备工作不占主锁，接受编号按入队顺序分配，而不是按 submit 开始顺序。
@@ -239,9 +255,8 @@ void thread_pool_test_access::exercise_submit(thread_pool& pool) {
         fail_queue_allocation = true;
         try {
             before_allocation_failure.push_back(pool.submit([] { return 3; }));
-        } catch (const submission_error& error) {
-            try { std::rethrow_exception(error.original_exception()); }
-            catch (const std::bad_alloc&) { allocation_failed = true; }
+        } catch (const std::bad_alloc&) {
+            allocation_failed = true;
             assert(pool.last_accepted_id_ == previous_id);
             assert(pool.tasks_.size() == previous_size);
             assert(pool.unfinished_tasks_.size() == progress_before_push);
@@ -259,9 +274,8 @@ void thread_pool_test_access::exercise_submit(thread_pool& pool) {
     pool.last_accepted_id_ = std::numeric_limits<std::uint64_t>::max();
     bool overflow_reported = false;
     try { (void)pool.submit([] { return 1; }); }
-    catch (const submission_error& error) {
-        try { std::rethrow_exception(error.original_exception()); }
-        catch (const std::overflow_error&) { overflow_reported = true; }
+    catch (const std::overflow_error& error) {
+        overflow_reported = std::string(error.what()) == "thread pool task ID exhausted";
     }
     assert(overflow_reported && pool.tasks_.empty() && pool.unfinished_tasks_.empty());
     assert(pool.last_accepted_id_ == std::numeric_limits<std::uint64_t>::max());
