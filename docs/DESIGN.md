@@ -2,11 +2,11 @@
 
 [项目入口](../README.md) · [目标 API 契约](API.md) · [当前实现进度](IMPLEMENTATION.md)
 
-精简方向已审核通过，本文纳入用户补充决定，并与 API.md、IMPLEMENTATION.md 同步。模块 1“任务结果与异常反馈”已落实；暂停、快照进度及公共生命周期仍待逐模块迁移。本文描述目标设计，具体已实现范围以 IMPLEMENTATION.md 为准。
+精简方向已审核通过，本文纳入用户补充决定，并与 API.md、IMPLEMENTATION.md 同步。模块 1“任务结果与异常反馈”和模块 2“移除快照进度”已落实；暂停及公共生命周期仍待逐模块迁移。本文描述目标设计，具体已实现范围以 IMPLEMENTATION.md 为准。
 
 已确定：丢弃任务使用 broken_promise；支持并发关闭，首次关闭者负责 join，其他调用者等待，不升级关闭方式；保留 worker 自关闭检测，增加最小化的关闭负责人重入检测；保留现有 Task 类型擦除；用户任务执行、捕获对象销毁和 worker join 均在主锁外；不增加功能或公共 API。
 
-当前源码已完成 Task、submit、work_thread 生命周期、worker 循环、线程身份判定、默认 worker 数量及快照进度登记；已移除自定义异常、cancel 和取消标志，采用原异常反馈与未执行 Task 销毁时的 broken_promise。池构造、析构和公共关闭接口仍只有声明，完整线程池尚不能直接使用。现有两项测试使用池生命周期桩，不能证明公共生命周期正确。
+当前源码已完成 Task、submit、work_thread 生命周期、worker 循环、线程身份判定及默认 worker 数量；已移除自定义异常、cancel、取消标志、快照 wait、任务 ID 与进度登记，采用原异常反馈与未执行 Task 销毁时的 broken_promise。池构造、析构和公共关闭接口仍只有声明，完整线程池尚不能直接使用。现有两项测试使用池生命周期桩，不能证明公共生命周期正确。
 
 ## 1. 目标范围
 
@@ -38,21 +38,21 @@
 | 删除或修改项 | 直接依赖与连带改动 |
 | --- | --- |
 | pause()、resume()、PAUSED、change_state() | 删除暂停接口和专用辅助声明；修改 submit 状态检查、worker 等待谓词、状态驱动测试 |
-| wait()、wait_result、wait_active_ | 删除快照 API 与单一有效等待资格；不替换为另一种全池 wait |
-| task_id_type、Task::id_ / id()、Task 的 ID 友元、last_accepted_id_ | 修改 Task 构造、submit 入队、worker 领取及测试；移除编号溢出逻辑 |
-| unfinished_tasks_、first_cancelled_id_、finish_task()、progress_changed_ | 删除 set 登记/回滚、完成登记和历史取消判断；worker 完成后直接进入下一轮 |
+| wait()、wait_result、wait_active_（已删除） | 删除快照 API 与单一有效等待资格；不替换为另一种全池 wait |
+| task_id_type、Task::id_ / id()、Task 的 ID 友元、last_accepted_id_（已删除） | Task 仅持有类型擦除对象，submit 直接入队；编号溢出逻辑和测试已移除 |
+| unfinished_tasks_、first_cancelled_id_、finish_task()、progress_changed_（已删除） | 删除 set 登记/回滚、完成登记和历史取消判断；worker 完成后直接进入下一轮 |
 | Task::cancel()、base/model 的 cancel、shared_ptr<bool> cancelled | 不再调用任务来制造取消异常；立即关闭通过锁外销毁未执行 Task 反馈 broken_promise |
 | submission_error、task_execution_error、original_exception() | 删除捕获再包装；准备、入队失败和任务函数异常保持原类型 |
 | submission_rejected、task_cancelled、thread_pool_call_error | 统一使用标准异常，见第 4 节；不保留自定义异常体系 |
 | 关闭升级及 join_in_progress_ | 由 RUNNING 到关闭状态的唯一首次转换确定关闭负责人；去掉升级与额外 join 资格布尔值，见第 6 节 |
 | 私有 closing_thread_id_（待增加） | 一个由 mutex_ 保护的 std::thread::id，仅用于关闭负责人重入检测；不是任务 ID 或额外的 join 资格标志 |
-| 专用 include 与旧注释 | 使用点清理后移除 set、limits 及任务编号相关依赖；cstdint 是否保留取决于状态枚举底层类型 |
+| 专用 include 与旧注释 | 已移除 set、limits 及任务编号相关依赖；cstdint 保留供状态枚举底层类型使用 |
 
 删除链条如下，各链条应连同对应测试一起修改，避免留下孤立成员：
 
 ```text
 快照 wait
-  → 接受边界 / Task ID / 未完成 set / 历史取消记录
+  → 接受编号 / Task ID / 未完成 set / 历史取消记录
   → submit 登记和回滚 / worker finish_task / progress_changed_
 
 自定义取消反馈
@@ -205,12 +205,12 @@ broken_promise、首次关闭方式保持到底、并发等待、worker 自关�
 
 ## 8. 分模块推进与验证
 
-模块 1 已完成并同步 API.md 和 IMPLEMENTATION.md；下一模块为移除快照进度。源码阶段每轮只处理下列一个功能模块，同时调整其直接依赖的测试，验证后停止，不自动继续下一模块。
+模块 1、2 已完成并同步 API.md 和 IMPLEMENTATION.md；下一模块为移除暂停恢复。源码阶段每轮只处理下列一个功能模块，同时调整其直接依赖的测试，验证后停止，不自动继续下一模块。
 
 | 次序 | 单一功能模块 | 修改与验证范围 |
 | --- | --- | --- |
 | 1（已完成） | 任务结果与异常反馈 | 保留 Task/model/packaged_task，移除自定义异常和取消标志/cancel，采用第 4 节标准异常反馈；submit 和 worker 测试通过，公共关闭检查待模块 4 接入 |
-| 2 | 移除快照进度 | 删除 wait、ID、set、历史取消、finish_task 与专用成员；同步去掉 submit/worker 登记；保留多生产者恰好执行一次、锁外准备和 FIFO 的测试，重新设计不依赖 set 的队列分配失败注入 |
+| 2（已完成） | 移除快照进度 | 删除 wait、ID、set、历史取消、finish_task 与专用成员；同步去掉 submit/worker 登记；保留多生产者恰好执行一次、锁外准备和 FIFO，队列分配失败注入已独立于 set |
 | 3 | 移除暂停恢复 | 删除接口、PAUSED 和辅助声明，简化状态谓词；用 latch/受控阻塞任务组织 FIFO 和未领取任务测试，去掉 PAUSED 初始化桩，运行 worker 与 submit 测试 |
 | 4 | 池生命周期与两种关闭 | 完成构造/失败回收/析构及共用关闭流程；移除测试生命周期桩，验证公共接口可直接链接与使用，并覆盖并发关闭、无升级、worker 自关闭拒绝、负责人重入拒绝、排空、丢弃和析构等待 |
 | 5 | 性能验证 | 正确性模块通过后单独建立最小基准和结果记录；不新增线程池功能，性能数据跑出后再用于 README/简历 |
@@ -239,8 +239,10 @@ ctest --test-dir build/ucrt64-debug --output-on-failure
 
 ## 9. 本轮检查记录
 
-本轮阅读项目 Markdown、源码、测试及 CMake 配置，运行精简前基线，两项 CTest 均通过（2/2）。现有文档和头文件改动已保存为 master 上的本地提交 d0445e9，精简在 refactor/simplify-thread-pool 分支进行。
+精简前基线保存在 master 的 d0445e9，模块 1 保存在精简分支的 b4340f5；模块 1 构建及两项 CTest 已通过（2/2）。
 
-模块 1 已移除五种自定义异常、异常包装、cancel 和取消标志，保留 ID/set、暂停以及 worker 架构。适配后的测试覆盖原异常类型与信息、结果存储失败、bad_alloc/overflow_error 直接传播、值/void/引用任务销毁反馈 broken_promise，以及锁外丢弃触发用户析构中的 submit。
+本轮完成模块 2：移除快照接口、任务编号、set、历史丢弃记录、完成登记及专用条件变量/等待资格，不新增产品进度计数。submit 保留锁外准备和锁内成功入队的接受边界，worker 在锁外执行/销毁 Task 后直接循环。暂停及公共生命周期留待后续模块。
 
-ucrt64-debug 构建（含头文件检查）及两项 CTest 均通过（2/2）。本轮到此停止；公共关闭、快照移除和暂停移除仍未完成，测试桩不能证明目标关闭契约。
+测试改为通过任务 future、捕获析构 latch 和 worker join 验证各自边界；保留单 worker FIFO、锁外准备和丢弃反馈，增加真实多 worker/多生产者的逐任务执行次数验证。队列扩容失败注入跳过实测的准备分配，独立于 ID/set，并验证已有任务保持原状与重试成功。
+
+ucrt64-debug 配置、构建（含头文件检查）、两项 CTest（2/2）及 Git 差异格式检查均通过。本轮到此停止，下一模块移除暂停恢复；测试仍使用生命周期/状态桩，不能证明目标公共关闭契约。

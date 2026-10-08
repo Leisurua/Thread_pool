@@ -27,9 +27,7 @@ void work_thread::run() {
             pool_.tasks_.pop();
         }
 
-        const auto id = task->id();
         (*task)(); // 用户异常由 packaged_task 保存，worker 继续循环。
-        task.reset(); // 用户对象在锁外销毁，完成后再发布处理进度。
-        pool_.finish_task(id, false);
+        task.reset(); // 用户对象在锁外销毁，再进入下一轮领取。
     }
 }

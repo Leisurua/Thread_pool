@@ -2,30 +2,30 @@
 
 [项目入口](../README.md) · [目标 API 契约](API.md) · [内部设计](DESIGN.md)
 
-精简方向及用户补充决定已确定，现已完成模块 1“任务结果与异常反馈”。每轮仅修改一个明确功能模块及其直接依赖的测试，验证后停止；下一模块为移除快照进度。
+精简方向及用户补充决定已确定，现已完成模块 1“任务结果与异常反馈”和模块 2“移除快照进度”。每轮仅修改一个明确功能模块及其直接依赖的测试，验证后停止；下一模块为移除暂停恢复。
 
 API.md 描述精简后的目标契约，DESIGN.md 描述目标内部结构；本文分别记录当前源码事实、目标差异与后续验证，避免将文档决定当作已实现行为。
 
 代码采用 C++20 头文件与源文件分离结构，work_thread::run 在 src/thread_pool.cpp 中实现，其余已实现逻辑位于头文件。当前完整线程池尚不能直接使用。
 
-## 1. 当前源码事实（模块 1 完成）
+## 1. 当前源码事实（模块 1、2 完成）
 
 | 模块 | 当前进度 | 与精简目标的关系 |
 | --- | --- | --- |
-| 状态与公共接口 | 五种状态，含 PAUSED；暂停恢复、两种关闭、快照 wait 均有声明 | 删除 PAUSED、pause/resume 和 wait；保留四种运行/关闭状态 |
-| Task 类型擦除 | 保留非模板外层、unique_ptr<base>、model<R> 和 packaged_task；已删除 cancel 和取消标志 | ID 留待模块 2 删除；未执行 Task 的销毁反馈 broken_promise |
-| submit | 保留锁外准备、状态检查、编号/set 登记、入队回滚及 future 返回；已删除异常包装 | 编号/set 留待模块 2 删除，PAUSED 接受行为留待模块 3 删除 |
+| 状态与公共接口 | 五种状态，含 PAUSED；暂停恢复与两种关闭均有声明；快照 wait 已删除 | PAUSED 和 pause/resume 留待模块 3 删除；保留四种运行/关闭状态 |
+| Task 类型擦除 | 保留非模板外层、unique_ptr<base>、model<R> 和 packaged_task；已删除 ID、cancel 和取消标志 | 未执行 Task 的销毁反馈 broken_promise，架构精简完成 |
+| submit | 保留锁外准备、状态检查、直接入队及 future 返回；已删除编号/set 登记、回滚与异常包装 | 成功入队仍是接受边界；PAUSED 接受行为留待模块 3 删除 |
 | 提交与任务异常 | 已删除 submission_rejected、submission_error、task_cancelled、task_execution_error | 拒绝提交抛 runtime_error；准备/入队失败及任务异常传播原类型 |
 | thread_pool_call_error | 已删除 | 显式自等待错误将使用 std::logic_error，公共关闭检查尚未接入 |
 | 默认 worker 数量 | 已实现，采用 hardware_concurrency()，返回 0 保底 1 | 保留，不重写 |
 | thread_pool 构造与析构 | 仅声明 | worker 创建、部分失败回收、默认优雅关闭待实现 |
-| work_thread 生命周期与 run | 已实现 jthread 启动、谓词等待、FIFO 领取、锁外执行/销毁及退出 | 保留架构，删除 PAUSED 分支与 finish_task 登记 |
+| work_thread 生命周期与 run | 已实现 jthread 启动、谓词等待、FIFO 领取、锁外执行/销毁及退出；已删除 finish_task 登记 | 保留架构，暂停分支留待模块 3 删除 |
 | worker 身份判定 | 已实现 TLS、RAII 守卫与 is_current_worker | 保留；关闭入口拒绝检查尚未接入 |
 | 关闭负责人重入检测 | 未实现，当前没有负责人线程 ID | 增加一个私有 std::thread::id，由现有 mutex_ 保护 |
 | pause / resume / change_state | 仅声明 | 删除，不实现 |
 | shutdown / shutdown_now / close | 仅声明，旧注释涉及升级与共用 join | 实现首次关闭方式保持到底、唯一负责人 join、其他调用者等待 |
-| ID / finish_task / 快照进度 | Task ID、接受编号、unfinished set、最早丢弃记录、完成登记已实现 | 连同 progress_changed_、wait_active_ 等快照依赖删除 |
-| wait / wait_result | 快照接口及结果类型已声明，算法未实现 | 删除，不增加替代全池 wait |
+| ID / finish_task / 快照进度 | Task ID、接受编号、unfinished set、最早丢弃记录、完成登记及专用同步成员均已删除 | 使用点和 set/limits 依赖已清理，不新增产品进度计数 |
+| wait / wait_result | 快照接口及结果类型均已删除 | 通过各任务 future 等待，不增加替代全池 wait |
 | 性能数据 | 没有基准程序或实测结果 | 生命周期和正确性完成后单独测量 |
 
 src/thread_pool.cpp 编译进 thread_pool 静态库；使用方须链接 thread_pool::thread_pool。测试中的生命周期和状态桩不是产品实现，静态库及测试可构建不代表公共池构造和关闭已可使用。
@@ -49,12 +49,12 @@ src/thread_pool.cpp 编译进 thread_pool 静态库；使用方须链接 thread_
 
 ## 3. 分模块实施顺序
 
-模块 1 已完成并通过 submit 与 worker 测试；模块 2 至 5 尚未开始。每个模块落实后同步文档中的实际进度，运行相应测试，不自动串行完成全部模块。新的并发问题先说明原因与可选方案，再讨论决定。
+模块 1、2 已完成并通过 submit 与 worker 测试；模块 3 至 5 尚未开始。每个模块落实后同步文档中的实际进度，运行相应测试，不自动串行完成全部模块。新的并发问题先说明原因与可选方案，再讨论决定。
 
 | 次序 | 功能模块 | 直接修改范围 | 主要验证 |
 | --- | --- | --- | --- |
 | 1（已完成） | 任务结果与异常反馈 | 保留 Task/base/model/packaged_task；移除自定义异常、取消标志和 cancel；适配 submit 与 worker 测试反馈 | 原异常类型/信息、用户复制失败原异常、结果存储失败、销毁未执行 Task 后 broken_promise、callable 不被调用、异常后 worker 继续运行 |
-| 2 | 移除快照进度 | 删除 wait/wait_result、Task ID、接受边界、set、历史取消、finish_task、progress_changed_、wait_active_；同步去掉 submit/worker 登记 | 保留多生产者恰好执行一次、锁外准备、FIFO；删除 ID 溢出/历史取消断言，调整队列分配失败注入使其不依赖 set |
+| 2（已完成） | 移除快照进度 | 删除 wait/wait_result、Task ID、接受编号、set、历史取消、finish_task、progress_changed_、wait_active_；同步去掉 submit/worker 登记 | 保留多生产者恰好执行一次、锁外准备、FIFO；删除 ID 溢出/历史取消断言，队列分配失败注入已独立于 set |
 | 3 | 移除暂停恢复 | 删除 pause/resume、PAUSED、change_state；简化 submit 状态检查和 worker 谓词 | 用受控阻塞任务/latch 替代暂停桩组织 FIFO、已领取与未领取边界，验证空队列唤醒和退出 |
 | 4 | 池生命周期与两种关闭 | 实现构造/失败回收/析构/close；保留 shutdown_complete_，移除 join_in_progress_，增加负责人线程 ID；删除测试生命周期定义桩 | 公共接口直接链接使用、优雅排空、立即丢弃、并发关闭与无升级、worker 自关闭、负责人重入、析构等待、部分构造失败回收 |
 | 5 | 性能验证 | 单独建立最小基准、记录环境/计时边界/结果，随后更新展示文档 | 校验任务结果；测量提交开销及完整批次吞吐，比较直接串行、单 worker 和多 worker，多轮数据 |
@@ -70,7 +70,7 @@ src/thread_pool.cpp 编译进 thread_pool 静态库；使用方须链接 thread_
 | thread_pool / thread_pool::thread_pool | STATIC 库，编译 worker 循环并传递包含目录、C++20、线程依赖和警告选项 |
 | thread_pool_header_check | OBJECT 目标，验证头文件独立编译与重复包含，不链接完整线程池 |
 | thread_pool_submit_test | 使用生命周期桩验证产品 submit 与 Task |
-| thread_pool_worker_test | 使用生命周期/状态桩验证真实 work_thread::run 与 finish_task |
+| thread_pool_worker_test | 使用生命周期/状态桩验证真实 work_thread::run，以 future、latch 和 join 判断对应完成边界 |
 
 CMake 使用 include(CTest)，默认启用 BUILD_TESTING；可通过 -DBUILD_TESTING=OFF 关闭行为测试目标。CTest 名称为 thread_pool_submit 和 thread_pool_worker，各自超时 30 秒。
 
@@ -86,31 +86,33 @@ ctest --test-dir build/ucrt64-debug --output-on-failure
 
 产物位于 build/ucrt64-debug/。使用 MSYS2 UCRT64 GNU GCC 16.2.0、CMake + Ninja、C++20，禁用 GNU 扩展；预设只为项目构建设置 PATH。工具链及 clangd 设置见 [CLAUDE.md](../CLAUDE.md)。
 
-## 5. 现有测试覆盖（异常反馈已适配，其余待逐模块迁移）
+## 5. 现有测试覆盖（模块 1、2 已适配，暂停及生命周期待迁移）
 
-[submit_test.cpp](../tests/submit_test.cpp) 不创建真实 worker，通过生命周期桩和友元访问直接驱动产品 submit、Task 与 finish_task，已覆盖：
+[submit_test.cpp](../tests/submit_test.cpp) 不创建真实 worker，通过生命周期桩和友元访问直接驱动产品 submit 与 Task，已覆盖：
 
 - submit 返回时任务尚未执行，future 尚未就绪。
 - 值、void、左值引用结果，move-only callable/参数、std::ref 和仅左值可调用对象。
 - 原函数异常的动态类型和信息直接保留，packaged_task 内部结果存储异常保持原类型。
 - 未执行的值/void/左值引用 Task 在锁外销毁后，future 就绪并反馈 broken_promise，callable 不执行。
-- PAUSED 接受提交，三种关闭状态拒绝且不推进接受边界。
+- PAUSED 接受提交，三种关闭状态拒绝且不入队。
 - 用户复制构造抛 runtime_error 派生异常时，原动态类型与信息保持不变。
-- 锁外准备、按入队顺序编号、多线程提交编号/set 一致性。
-- 队列分配失败直接抛 bad_alloc，登记回滚后可重试；任务 ID 溢出直接抛 overflow_error。
+- 受控复制阻塞时另一个 submit 仍可入队并执行，验证锁外准备。
+- 多线程提交后逐任务核对结果与调用次数，验证恰好执行一次。
+- 同一 callable 的多次成功 submit 用于测量准备分配数，跳过准备分配后对额外的队列扩容分配注入失败；bad_alloc 直接传播，已有任务保持原状且可重试。该注入针对本机 UCRT64 标准库，不依赖产品 ID/set 或固定对象大小。
 
 [worker_test.cpp](../tests/worker_test.cpp) 通过池生命周期与状态桩创建真实产品 worker，已覆盖：
 
 - 本池/池外/其他池线程身份判定，任务内 submit 可继续执行。
 - 任务异常按原动态类型与信息进入 future，之后任务继续执行。
-- 暂停时不领取，恢复后单 worker FIFO；暂停队列保留 ID/set 登记。
-- 双 worker 乱序完成时保留最早未完成 ID 并通知进度。
-- worker 持有最后一个共享状态引用时，Task 释放触发的用户析构可 submit 到本池，验证销毁在锁外且先于完成登记。
+- 暂停时不领取，恢复后单 worker FIFO。
+- 双 worker 乱序完成时，后一个 future 先就绪，受 latch 阻塞的前一个 future 仍未就绪。
+- 四个生产者和四个真实 worker 并发提交/领取 96 个任务，核对结果，join 后逐任务核对执行次数均为 1；计数仅用于测试，不加入产品。
+- worker 持有最后一个共享状态引用时，Task 释放触发的用户析构可 submit 到本池；析构通过 latch 通知主线程，验证销毁在锁外并同步结果写入。
 - 直接设置优雅关闭状态后排空队列；直接设置立即关闭状态后保留已领取任务，不领取剩余任务。
 - 未执行 Task 持有最后一个共享状态引用时，锁外丢弃触发的用户析构可再次 submit，不持有主锁。
-- 关闭状态使空闲 worker 退出；测试桩锁外销毁排队 Task 后反馈 broken_promise，再删除 ID，逆序丢弃保留最早丢弃 ID。
+- 关闭状态使空闲 worker 退出；测试桩将队列在锁内交换、锁外销毁，排队 Task 反馈 broken_promise。
 
-现有测试依赖 unfinished_tasks_ 等内部记录判断进度；future 就绪先于这些登记，不能以 get() 返回替代旧进度检查。移除快照模块时同步移除这些断言和等待驱动。
+测试已移除 ID 溢出、历史取消和快照登记断言，以及相关等待驱动。任务结果通过 future 验证；需要确认捕获对象销毁时使用 latch，需要确认 worker 退出时使用 join，不能将 future 就绪视为这两个边界。
 
 异常替换与 Task 销毁反馈已经验证，但公共并发关闭、无升级、负责人重入检测、构造失败清理或产品析构仍未验证。直接驱动状态不是公共关闭接口测试。
 
@@ -135,6 +137,8 @@ worker 和负责人重入析构本池的 terminate 路径若增加测试，应�
 
 比较直接串行、单 worker、多 worker；分别报告批量 submit 的平均提交耗时，以及首个提交至全部 future.get 完成的总耗时和吞吐，注明 future 收集与分配成本。预热、多轮测量，报告中位数与波动范围；不承诺小任务加速，也不编造性能数据。
 
-本轮先运行精简前基线：ucrt64-debug 配置、构建及两项 CTest 均通过（2/2），随后将已有文档与头文件改动保存为 master 上的本地提交 d0445e9，并创建 refactor/simplify-thread-pool 分支。
+精简前基线已保存为 master 上的本地提交 d0445e9；精简分支为 refactor/simplify-thread-pool。模块 1 提交为 b4340f5，构建及两项 CTest 通过（2/2）。
 
-模块 1 修改 include/thread_pool.hpp、两份行为测试及进度文档。完成后 ucrt64-debug 构建（含头文件检查）及 thread_pool_submit、thread_pool_worker 两项 CTest 均通过（2/2）。该结果验证模块 1 和保留的 Task/submit/worker 行为，不代表公共池生命周期已经完成。本轮到此停止，保留暂停、快照和生命周期桩供后续模块迁移。
+模块 2 修改头文件、worker 源文件及两份行为测试，同步设计、API、进度和项目入口说明。wait/ID/set/finish_task 及其专用依赖已全部移除；保留暂停行为、关闭同步成员和生命周期桩。
+
+本轮 ucrt64-debug 配置、构建（含头文件检查）及 thread_pool_submit、thread_pool_worker 两项 CTest 均通过（2/2）；源码与测试中无快照依赖残留，Git 差异格式检查通过。本轮到此停止，下一模块移除暂停恢复；公共池生命周期仍未完成。

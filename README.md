@@ -1,12 +1,12 @@
 # C++20 固定 worker 数量线程池
 
-V1.0 目标是实现一个固定 worker 数量、使用 FIFO 队列的 C++20 线程池，提供任务提交、暂停与恢复、两种关闭方式及任务快照等待。
+V1.0 目标是实现一个固定 worker 数量、使用 FIFO 队列的 C++20 线程池，提供任务提交、future 结果反馈及两种关闭方式。精简已完成异常反馈和快照进度移除，下一模块移除暂停恢复。
 
 ## 当前进度
 
-已实现 `Task` 类型擦除、`std::packaged_task` 结果反馈、`submit()`、work_thread 生命周期与 worker 循环、worker 身份判定及有序 set 进度登记，并配置头文件编译检查、submit 与真实 worker 行为测试。
+已实现 `Task` 类型擦除、`std::packaged_task` 原异常反馈、`submit()`、work_thread 生命周期与 worker 循环、worker 身份判定，并配置头文件编译检查、submit 与真实 worker 行为测试。任务 ID、快照等待与 set 进度登记已删除；未执行 Task 销毁通过 future 反馈 `broken_promise`。
 
-线程池构造、析构、`pause()`、`resume()`、`shutdown()`、`shutdown_now()` 和 `wait()` 仍只有声明，完整线程池尚不能直接使用。测试通过专用池生命周期及状态桩驱动产品逻辑，不代表公共关闭或等待流程已完成。
+线程池构造、析构、`pause()`、`resume()`、`shutdown()` 和 `shutdown_now()` 仍只有声明，完整线程池尚不能直接使用。暂停相关声明和状态留待下一模块删除。测试通过专用池生命周期及状态桩驱动产品逻辑，不代表公共关闭流程已完成。
 
 V1.0 不包含有界队列、动态 worker 数量或 work-stealing。FIFO 保证任务领取顺序，不保证多个 worker 实际进入 callable 或完成任务的顺序。
 
@@ -30,7 +30,7 @@ ctest --test-dir build/ucrt64-debug --output-on-failure
 
 ```text
 thread_pool_project/
-├── include/thread_pool.hpp   # 接口声明及 Task、submit、worker 生命周期与进度登记实现
+├── include/thread_pool.hpp   # 接口声明及 Task、submit、worker 生命周期实现
 ├── src/thread_pool.cpp       # worker 的 run 实现，编译为静态库
 ├── tests/submit_test.cpp     # 使用生命周期桩的 submit 行为测试
 ├── tests/worker_test.cpp     # 使用池生命周期/状态桩的真实 worker 行为测试
@@ -48,8 +48,8 @@ thread_pool_project/
 
 | 文档 | 内容 |
 | --- | --- |
-| [API.md](docs/API.md) | 构造、提交、暂停、关闭、wait 与异常反馈规则 |
-| [DESIGN.md](docs/DESIGN.md) | 状态转换、并发边界、类型擦除、提交流程与快照进度 |
+| [API.md](docs/API.md) | 构造、提交、关闭、future 与异常反馈规则 |
+| [DESIGN.md](docs/DESIGN.md) | 状态转换、并发边界、类型擦除、提交流程与模块精简 |
 | [IMPLEMENTATION.md](docs/IMPLEMENTATION.md) | 已实现和待实现清单、构建目标及测试边界 |
 | [CLAUDE.md](CLAUDE.md) | 工具链、clangd 配置及构建约定 |
 

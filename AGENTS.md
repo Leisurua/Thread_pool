@@ -17,7 +17,7 @@ ctest --test-dir build/ucrt64-debug --output-on-failure
 项目 `.clangd` 从该构建目录读取 `compile_commands.json`，并按 UCRT64 GCC / C++20 解析。
 编辑器使用 `C:/msys64/ucrt64/bin/clangd.exe`，启动参数需包含
 `--query-driver=C:/msys64/ucrt64/bin/g++.exe`（本机 VS Code 已设置该目录通配符）。
-当前已实现 Task、submit、work_thread 生命周期及 run、finish_task 和 worker 身份判定；池生命周期、pause/resume、关闭及 wait 接口仍只有声明。
+当前已实现 Task、submit、work_thread 生命周期及 run 和 worker 身份判定；异常反馈已精简，快照 wait、任务 ID 与 finish_task 进度登记已删除。池生命周期、pause/resume 和关闭接口仍只有声明；下一模块移除暂停恢复。
 构建包含头文件检查目标，以及使用池生命周期/状态桩的 submit 和真实 worker 行为测试；完整线程池尚不能直接使用。
 worker 循环位于 src/thread_pool.cpp，构建为静态库，使用方须链接 thread_pool::thread_pool；其余已实现逻辑位于头文件。
 具体进度与测试范围见 [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md)。

@@ -4,6 +4,8 @@
 #endif
 #include "thread_pool.hpp"
 
+#include <array>
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <latch>
@@ -25,27 +27,9 @@ struct thread_pool_test_access {
         return pool.is_current_worker();
     }
 
-    static void wait_processed(thread_pool& pool, std::uint64_t id) {
-        std::unique_lock lock(pool.mutex_);
-        const bool finished = pool.progress_changed_.wait_for(lock, 3s, [&] {
-            return !pool.unfinished_tasks_.contains(id);
-        });
-        assert(finished);
-    }
-
-    static std::set<std::uint64_t> unfinished(thread_pool& pool) {
-        std::lock_guard lock(pool.mutex_);
-        return pool.unfinished_tasks_;
-    }
-
     static std::size_t queued(thread_pool& pool) {
         std::lock_guard lock(pool.mutex_);
         return pool.tasks_.size();
-    }
-
-    static std::uint64_t first_cancelled(thread_pool& pool) {
-        std::lock_guard lock(pool.mutex_);
-        return pool.first_cancelled_id_;
     }
 
     static void join(thread_pool& pool) {
@@ -53,20 +37,12 @@ struct thread_pool_test_access {
     }
 
     static void discard_queued(thread_pool& pool) {
-        std::vector<thread_pool::Task> discarded;
+        std::queue<thread_pool::Task> discarded;
         {
             std::lock_guard lock(pool.mutex_);
-            while (!pool.tasks_.empty()) {
-                discarded.push_back(std::move(pool.tasks_.front()));
-                pool.tasks_.pop();
-            }
+            discarded.swap(pool.tasks_);
         }
-        // 故意逆序反馈，验证最早丢弃 ID 不受完成顺序影响。
-        while (!discarded.empty()) {
-            const auto id = discarded.back().id();
-            discarded.pop_back(); // 主锁外销毁未执行 Task，future 反馈 broken_promise。
-            pool.finish_task(id, true);
-        }
+        // 局部队列在主锁外销毁，future 反馈 broken_promise。
     }
 
     static void close_for_test(thread_pool& pool) {
@@ -84,8 +60,7 @@ struct thread_pool_test_access {
 
 // 初始暂停让入队顺序和状态测试可控；这不是产品的构造/关闭实现。
 thread_pool::thread_pool(std::size_t worker_count)
-    : state_(status_t::PAUSED), last_accepted_id_(0), first_cancelled_id_(0),
-      wait_active_(false), join_in_progress_(false) {
+    : state_(status_t::PAUSED), join_in_progress_(false) {
     for (std::size_t index = 0; index < worker_count; ++index) {
         worker_threads_.push_back(std::make_unique<work_thread>(*this));
     }
@@ -119,8 +94,6 @@ void execution_and_identity() {
         original_error = std::string(error.what()) == "task failed";
     }
     assert(original_error && after_failure.get() == 17);
-    thread_pool_test_access::wait_processed(pool, 4);
-    assert(thread_pool_test_access::unfinished(pool).empty());
 }
 
 void paused_and_fifo() {
@@ -134,10 +107,8 @@ void paused_and_fifo() {
     thread_pool_test_access::set_state(pool, status_t::PAUSED);
     assert(results.front().wait_for(50ms) == std::future_status::timeout);
     assert(thread_pool_test_access::queued(pool) == 3);
-    assert(thread_pool_test_access::unfinished(pool) == (std::set<std::uint64_t>{1, 2, 3}));
     thread_pool_test_access::set_state(pool, status_t::RUNNING);
     for (auto& result : results) { result.get(); }
-    thread_pool_test_access::wait_processed(pool, 3);
     assert(order == (std::vector<int>{1, 2, 3}));
 }
 
@@ -149,25 +120,64 @@ void out_of_order_completion() {
     thread_pool_test_access::set_state(pool, status_t::RUNNING);
     entered.wait();
     assert(second.get() == 2);
-    thread_pool_test_access::wait_processed(pool, 2);
-    assert(thread_pool_test_access::unfinished(pool) == (std::set<std::uint64_t>{1}));
+    assert(first.wait_for(0s) == std::future_status::timeout);
     release.count_down();
     first.get();
-    thread_pool_test_access::wait_processed(pool, 1);
-    assert(thread_pool_test_access::unfinished(pool).empty());
+}
+
+void concurrent_producers_execute_once() {
+    constexpr int producer_count = 4;
+    constexpr int tasks_per_producer = 24;
+    std::array<std::atomic<int>, producer_count * tasks_per_producer> calls{};
+    std::array<std::vector<std::future<int>>, producer_count> results;
+    std::latch ready(producer_count);
+    thread_pool pool(4);
+    thread_pool_test_access::set_state(pool, status_t::RUNNING);
+    std::vector<std::jthread> producers;
+    for (int producer = 0; producer < producer_count; ++producer) {
+        producers.emplace_back([&, producer] {
+            ready.count_down();
+            ready.wait();
+            for (int index = 0; index < tasks_per_producer; ++index) {
+                const int expected = producer * tasks_per_producer + index;
+                results[producer].push_back(pool.submit([&, expected] {
+                    calls[expected].fetch_add(1, std::memory_order_relaxed);
+                    return expected;
+                }));
+            }
+        });
+    }
+    producers.clear();
+    for (int producer = 0; producer < producer_count; ++producer) {
+        for (int index = 0; index < tasks_per_producer; ++index) {
+            const int expected = producer * tasks_per_producer + index;
+            assert(results[producer][index].get() == expected);
+        }
+    }
+    thread_pool_test_access::set_state(pool, status_t::SHUTDOWN);
+    thread_pool_test_access::join(pool);
+    for (const auto& count : calls) {
+        assert(count.load(std::memory_order_relaxed) == 1);
+    }
+    assert(thread_pool_test_access::queued(pool) == 0);
 }
 
 struct submit_on_destroy {
     thread_pool& pool;
     std::future<int>& result;
-    ~submit_on_destroy() { result = pool.submit([] { return 9; }); }
+    std::latch& destroyed;
+    ~submit_on_destroy() {
+        result = pool.submit([] { return 9; });
+        destroyed.count_down();
+    }
 };
 
 void destruction_outside_lock() {
     thread_pool pool(1);
-    std::latch entered(1), release(1);
+    std::latch entered(1), release(1), destroyed(1);
     std::future<int> destructor_result;
-    auto probe = std::unique_ptr<submit_on_destroy>(new submit_on_destroy{pool, destructor_result});
+    auto probe = std::unique_ptr<submit_on_destroy>(
+        new submit_on_destroy{pool, destructor_result, destroyed});
     auto result = pool.submit([owned = std::move(probe), &entered, &release] {
         entered.count_down();
         release.wait();
@@ -176,17 +186,20 @@ void destruction_outside_lock() {
     entered.wait();
     result = {}; // 释放 future，保证 worker 的 Task 持有最后一个共享状态引用。
     release.count_down();
-    thread_pool_test_access::wait_processed(pool, 1);
+    destroyed.wait(); // 同步析构写入，future 就绪不能替代捕获对象销毁。
     assert(destructor_result.valid() && destructor_result.get() == 9);
 }
 
 void discarded_destruction_outside_lock() {
     thread_pool pool(1);
+    std::latch destroyed(1);
     std::future<int> destructor_result;
-    auto probe = std::unique_ptr<submit_on_destroy>(new submit_on_destroy{pool, destructor_result});
+    auto probe = std::unique_ptr<submit_on_destroy>(
+        new submit_on_destroy{pool, destructor_result, destroyed});
     auto result = pool.submit([owned = std::move(probe)] { assert(false); });
     result = {}; // Task 持有最后一个共享状态引用，丢弃时确实触发用户析构。
     thread_pool_test_access::discard_queued(pool);
+    destroyed.wait();
     assert(destructor_result.valid());
     thread_pool_test_access::set_state(pool, status_t::RUNNING);
     assert(destructor_result.get() == 9);
@@ -198,7 +211,7 @@ void graceful_shutdown_from_pause() {
     thread_pool_test_access::set_state(pool, status_t::SHUTDOWN);
     thread_pool_test_access::join(pool);
     assert(result.get() == 5);
-    assert(thread_pool_test_access::unfinished(pool).empty());
+    assert(thread_pool_test_access::queued(pool) == 0);
 }
 
 void immediate_shutdown_preserves_claimed_task() {
@@ -214,8 +227,6 @@ void immediate_shutdown_preserves_claimed_task() {
     thread_pool_test_access::join(pool);
     assert(first.get() == 1);
     assert(thread_pool_test_access::queued(pool) == 2);
-    assert(thread_pool_test_access::unfinished(pool) == (std::set<std::uint64_t>{2, 3}));
-    assert(thread_pool_test_access::first_cancelled(pool) == 0);
     thread_pool_test_access::discard_queued(pool);
     for (auto* result : {&second, &third}) {
         assert(result->wait_for(0s) == std::future_status::ready);
@@ -226,8 +237,7 @@ void immediate_shutdown_preserves_claimed_task() {
         }
         assert(discarded);
     }
-    assert(thread_pool_test_access::unfinished(pool).empty());
-    assert(thread_pool_test_access::first_cancelled(pool) == 2);
+    assert(thread_pool_test_access::queued(pool) == 0);
 }
 
 void idle_workers_exit() {
@@ -244,6 +254,7 @@ int main() {
     execution_and_identity();
     paused_and_fifo();
     out_of_order_completion();
+    concurrent_producers_execute_once();
     destruction_outside_lock();
     discarded_destruction_outside_lock();
     graceful_shutdown_from_pause();

@@ -6,11 +6,9 @@
 #include <cstdint>
 #include <functional>
 #include <future>
-#include <limits>
 #include <memory>
 #include <mutex>
 #include <queue>
-#include <set>
 #include <stdexcept>
 #include <thread>
 #include <tuple>
@@ -18,7 +16,7 @@
 #include <utility>
 #include <vector>
 
-// Task、submit 和 worker 循环已实现；池生命周期、等待及关闭逻辑仍待实现。
+// Task、submit 和 worker 循环已实现；池生命周期、暂停恢复及关闭逻辑仍待实现。
 enum class status_t : std::int8_t {
     TERMINATED = -1, // 已关闭，所有 worker 已退出
     SHUTDOWN_NOW = 0, // 立即关闭中：丢弃尚未执行的任务，等待正在执行的任务结束
@@ -43,7 +41,7 @@ public:
     work_thread& operator=(work_thread&&) = delete;
 
 private:
-    void run(); // 线程池的 worker 循环；领取/完成记录持主锁，调用任务在锁外
+    void run(); // 线程池的 worker 循环；领取持主锁，执行和销毁任务在锁外
 
     thread_pool& pool_; // 非拥有引用，由线程池协调 worker 生命周期
     std::jthread thread_;
@@ -82,25 +80,14 @@ public:
     // 再将 packaged_task 移入 Task::model，类型擦除后直接入队。
     // Task 不直接保存 promise/future。成功入队后返回 future 句柄，不等待任务执行结束；
     // 调用方通过 future.wait()/get() 等待就绪或获取结果。
-    // 准备 Task/结果反馈在锁外进行；锁内统一检查状态、确定 ID 和入队。
+    // 准备 Task/结果反馈在锁外进行；锁内统一检查状态和入队。
     template<class F, class... Args>
     auto submit(F&& function, Args&&... args)
         -> std::future<std::invoke_result_t<std::decay_t<F>&,
                                            std::decay_t<Args>&&...>>;
-    enum class wait_result {
-        completed, // 快照全部执行结束（包含异常结束），没有丢弃
-        cancelled  // 快照全部处理结束，且至少一个任务被丢弃
-    };
-
-    // 等待锁内确定的任务快照，不关闭池；后续提交不扩展范围。
-    // 同时只允许一个有效 wait，禁止本池 worker 调用。
-    // 暂停/关闭时允许池外调用；暂停可能持续阻塞，历史丢弃计入结果。
-    wait_result wait();
 
 private:
-    using task_id_type = std::uint64_t;
-
-    // 每个线程记录所属池，供 wait/关闭接口识别本池 worker，由私有守卫维护。
+    // 每个线程记录所属池，供关闭接口识别本池 worker，由私有守卫维护。
     inline static thread_local const thread_pool* current_worker_pool_ = nullptr;
 
     // worker 入口登记所属池，离开作用域时恢复；work_thread 通过友元访问。
@@ -125,14 +112,11 @@ private:
 
     // 外层为统一类型；内部 model<R> 持有 submit 准备好的 packaged_task<R()>。
     class Task {
-        friend class thread_pool; // submit 在正式入队时确定 ID，避免准备顺序替代接受顺序
-
     public:
         // packaged_task 与 submit 已取得的 future 继续关联同一个共享状态。
         template<class R>
-        Task(task_id_type id, std::packaged_task<R()>&& packaged_task)
-            : id_(id),
-              task_(std::make_unique<model<R>>(std::move(packaged_task))) {}
+        explicit Task(std::packaged_task<R()>&& packaged_task)
+            : task_(std::make_unique<model<R>>(std::move(packaged_task))) {}
 
         ~Task() = default;
 
@@ -145,8 +129,6 @@ private:
         // 池保证仅执行一次或直接销毁，不对已移动的 Task 调用。
         // 未执行 packaged_task 的销毁通过 future 反馈 broken_promise。
         void operator()() noexcept { task_->execute(); }
-
-        task_id_type id() const noexcept { return id_; }
 
     private:
         class base {
@@ -168,7 +150,6 @@ private:
             std::packaged_task<R()> packaged_task_;
         };
 
-        task_id_type id_;
         std::unique_ptr<base> task_;
     };
 
@@ -176,22 +157,15 @@ private:
     bool is_current_worker() const noexcept;
     void change_state(status_t next); // 状态变更与队列操作共用主互斥锁
     void close(status_t requested);   // 共用关闭流程、升级与单次 join
-    void finish_task(task_id_type id, bool cancelled); // 记录进度并通知 wait
 
-    // 状态、队列、快照进度与 wait/join 资格统一由此锁保护。
+    // 状态、队列与 join 资格统一由此锁保护。
     // callable、丢弃反馈、用户对象销毁与 worker join 在锁外。
     std::mutex mutex_;
     std::condition_variable task_ready_;
-    std::condition_variable progress_changed_;
     std::condition_variable shutdown_complete_;
     status_t state_;
     std::queue<Task> tasks_;
 
-    // 包含排队与已领取的未处理 ID；有序 set 的最小值用于判断 wait 快照进度。
-    std::set<task_id_type> unfinished_tasks_;
-    task_id_type last_accepted_id_;
-    task_id_type first_cancelled_id_; // 0 表示尚无丢弃，区分快照内/外丢弃
-    bool wait_active_;
     bool join_in_progress_;
 
     // 最后声明，逆序析构 worker 时同步依赖仍然存活。
@@ -211,17 +185,6 @@ inline std::size_t thread_pool::default_worker_count() noexcept {
 
 inline bool thread_pool::is_current_worker() const noexcept {
     return current_worker_pool_ == this;
-}
-
-inline void thread_pool::finish_task(task_id_type id, bool cancelled) {
-    {
-        std::lock_guard lock(mutex_);
-        unfinished_tasks_.erase(id);
-        if (cancelled && (first_cancelled_id_ == 0 || id < first_cancelled_id_)) {
-            first_cancelled_id_ = id;
-        }
-    }
-    progress_changed_.notify_all();
 }
 
 template<class F, class... Args>
@@ -244,7 +207,7 @@ auto thread_pool::submit(F&& function, Args&&... args)
     };
     std::packaged_task<result_type()> packaged_task(std::move(invocation));
     auto future = packaged_task.get_future();
-    Task task(0, std::move(packaged_task));
+    Task task(std::move(packaged_task));
 
     // 锁比 task 后构造，异常退出时先解锁，再销毁用户函数和参数。
     std::unique_lock lock(mutex_);
@@ -253,19 +216,7 @@ auto thread_pool::submit(F&& function, Args&&... args)
         throw std::runtime_error("thread pool submission rejected");
     }
 
-    if (last_accepted_id_ == std::numeric_limits<task_id_type>::max()) {
-        throw std::overflow_error("thread pool task ID exhausted");
-    }
-    const task_id_type id = last_accepted_id_ + 1;
-    task.id_ = id;
-    unfinished_tasks_.insert(id);
-    try {
-        tasks_.push(std::move(task));
-    } catch (...) {
-        unfinished_tasks_.erase(id);
-        throw;
-    }
-    last_accepted_id_ = id;
+    tasks_.push(std::move(task)); // 成功入队即接受；失败直接传播原异常。
 
     lock.unlock();
     task_ready_.notify_one();

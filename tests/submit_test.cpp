@@ -12,9 +12,10 @@
 #include <string>
 
 namespace {
-// 只在测试队列扩容时注入分配失败，准备模型和登记 set 节点不受影响。
-thread_local std::set<std::uint64_t>* watched_progress = nullptr;
-thread_local std::size_t progress_before_push = 0;
+// 先测量无队列扩容时 submit 的分配数，再仅对额外的队列分配注入失败。
+thread_local bool count_allocations = false;
+thread_local std::size_t allocation_count = 0;
+thread_local std::size_t allocations_before_failure = 0;
 thread_local bool fail_queue_allocation = false;
 
 struct user_error : std::runtime_error {
@@ -52,9 +53,15 @@ struct slow_copy {
 }
 
 void* operator new(std::size_t size) {
-    if (fail_queue_allocation && watched_progress->size() > progress_before_push) {
-        fail_queue_allocation = false;
-        throw std::bad_alloc{};
+    if (count_allocations) {
+        ++allocation_count;
+    }
+    if (fail_queue_allocation) {
+        if (allocations_before_failure == 0) {
+            fail_queue_allocation = false;
+            throw std::bad_alloc{};
+        }
+        --allocations_before_failure;
     }
     if (void* memory = std::malloc(size == 0 ? 1 : size)) {
         return memory;
@@ -69,8 +76,7 @@ void operator delete[](void* memory, std::size_t) noexcept { std::free(memory); 
 
 // 测试专用池生命周期桩：不创建真实 worker，提交测试由友元访问器同步驱动。
 thread_pool::thread_pool(std::size_t)
-    : state_(status_t::RUNNING), last_accepted_id_(0), first_cancelled_id_(0),
-      wait_active_(false), join_in_progress_(false) {}
+    : state_(status_t::RUNNING), join_in_progress_(false) {}
 thread_pool::~thread_pool() = default;
 
 struct thread_pool_test_access {
@@ -85,19 +91,14 @@ void thread_pool_test_access::exercise_submit(thread_pool& pool) {
         pool.tasks_.pop();
         return task;
     };
-    auto finish = [&](std::uint64_t id) {
-        pool.finish_task(id, false);
-    };
     auto execute_one = [&] {
         auto task = take();
         task(); // 必须在锁外执行，用户异常通过 future 反馈。
-        finish(task.id());
     };
     auto drain = [&] {
         while (!pool.tasks_.empty()) {
             execute_one();
         }
-        assert(pool.unfinished_tasks_.empty());
     };
 
     // 返回类型混合入队；submit 返回时没有 worker，因此 future 必须仍未就绪。
@@ -112,7 +113,7 @@ void thread_pool_test_access::exercise_submit(thread_pool& pool) {
         std::make_unique<int>(4));
     auto left = pool.submit(left_only{});
     assert(value.wait_for(std::chrono::seconds(0)) == std::future_status::timeout);
-    assert(pool.tasks_.size() == 5 && pool.unfinished_tasks_.size() == 5);
+    assert(pool.tasks_.size() == 5);
     drain();
     assert(value.get() == 10 && target == 21);
     nothing.get();
@@ -146,12 +147,7 @@ void thread_pool_test_access::exercise_submit(thread_pool& pool) {
     auto discarded_void = pool.submit([&] { ++discarded_calls; });
     auto discarded_reference = pool.submit([&]() -> int& { ++discarded_calls; return target; });
     for (int index = 0; index < 3; ++index) {
-        std::uint64_t id;
-        {
-            auto task = take();
-            id = task.id();
-        } // 锁外释放未执行 packaged_task，结果提供方放弃共享状态。
-        pool.finish_task(id, true);
+        auto task = take(); // 作用域结束时在锁外销毁，不执行任务。
     }
     auto check_broken_promise = [](auto& result) {
         assert(result.wait_for(std::chrono::seconds(0)) == std::future_status::ready);
@@ -167,7 +163,7 @@ void thread_pool_test_access::exercise_submit(thread_pool& pool) {
     check_broken_promise(discarded_reference);
     assert(discarded_calls == 0);
 
-    // PAUSED 接受提交；三种关闭状态均拒绝，且不推进接受边界。
+    // PAUSED 接受提交；三种关闭状态均拒绝，不入队。
     pool.state_ = status_t::PAUSED;
     auto paused = pool.submit([] { return 9; });
     assert(paused.wait_for(std::chrono::seconds(0)) == std::future_status::timeout);
@@ -176,110 +172,108 @@ void thread_pool_test_access::exercise_submit(thread_pool& pool) {
     assert(paused.get() == 9);
     for (auto state : {status_t::SHUTDOWN, status_t::SHUTDOWN_NOW, status_t::TERMINATED}) {
         pool.state_ = state;
-        const auto previous_id = pool.last_accepted_id_;
         bool rejected = false;
         try { (void)pool.submit([] { return 1; }); }
         catch (const std::runtime_error& error) {
             rejected = std::string(error.what()) == "thread pool submission rejected";
         }
-        assert(rejected && pool.last_accepted_id_ == previous_id);
-        assert(pool.tasks_.empty() && pool.unfinished_tasks_.empty());
+        assert(rejected && pool.tasks_.empty());
     }
     pool.state_ = status_t::RUNNING;
 
     // 用户复制构造抛出的 runtime_error 派生异常保持类型与信息。
     copy_failure callable;
-    const auto id_before_copy = pool.last_accepted_id_;
     original_error = false;
     try { (void)pool.submit(callable); }
     catch (const user_error& error) {
         original_error = std::string(error.what()) == "copy failure";
     }
-    assert(original_error && pool.last_accepted_id_ == id_before_copy);
-    assert(pool.tasks_.empty() && pool.unfinished_tasks_.empty());
+    assert(original_error && pool.tasks_.empty());
 
-    // 准备工作不占主锁，接受编号按入队顺序分配，而不是按 submit 开始顺序。
+    // 受控复制尚未完成时，另一个 submit 可先入队并执行，证明准备不占主锁。
     std::latch entered(1), release(1);
     slow_copy slow(entered, release);
     std::future<int> slow_result;
-    const auto id_before_race = pool.last_accepted_id_;
     std::jthread submitting([&] { slow_result = pool.submit(slow); });
     entered.wait();
     auto fast_result = pool.submit([] { return 1; });
-    assert(pool.tasks_.front().id() == id_before_race + 1);
+    assert(pool.tasks_.size() == 1);
     execute_one();
     assert(fast_result.get() == 1);
     release.count_down();
     submitting.join();
-    assert(pool.tasks_.front().id() == id_before_race + 2);
+    assert(pool.tasks_.size() == 1);
     drain();
     assert(slow_result.get() == 2);
 
-    // 多线程提交；所有任务只入队一次，编号与 unfinished set 保持一致。
+    // 多线程提交；逐任务记录调用次数，验证所有任务恰好执行一次。
     constexpr int producer_count = 4;
     constexpr int tasks_per_producer = 24;
     std::vector<std::future<int>> results[producer_count];
     std::vector<std::jthread> producers;
-    const auto id_before_producers = pool.last_accepted_id_;
+    std::vector<int> calls(producer_count * tasks_per_producer, 0);
     for (int producer = 0; producer < producer_count; ++producer) {
         producers.emplace_back([&, producer] {
             for (int index = 0; index < tasks_per_producer; ++index) {
                 const int expected = producer * tasks_per_producer + index;
-                results[producer].push_back(pool.submit([expected] { return expected; }));
+                results[producer].push_back(pool.submit([&, expected] {
+                    ++calls[expected];
+                    return expected;
+                }));
             }
         });
     }
     producers.clear(); // jthread 析构等待提交线程完成。
     assert(pool.tasks_.size() == producer_count * tasks_per_producer);
-    auto expected_id = id_before_producers + 1;
-    while (!pool.tasks_.empty()) {
-        assert(pool.tasks_.front().id() == expected_id++);
-        assert(*pool.unfinished_tasks_.begin() == pool.tasks_.front().id());
-        execute_one();
-    }
+    drain();
     for (int producer = 0; producer < producer_count; ++producer) {
         for (int index = 0; index < tasks_per_producer; ++index) {
-            assert(results[producer][index].get() == producer * tasks_per_producer + index);
+            const int expected = producer * tasks_per_producer + index;
+            assert(results[producer][index].get() == expected);
+            assert(calls[expected] == 1);
         }
     }
 
-    // 对 deque 扩容注入失败，验证 push 失败后登记记录和接受边界都回滚。
+    // 同一 callable 多次提交并测量最小分配数，排除偶发的 deque 扩容分配。
+    // 此后跳过这些准备分配，只使队列扩容失败，不依赖产品进度记录或对象大小。
+    auto allocation_task = [] { return 3; };
+    std::size_t preparation_allocations = 0;
+    for (int sample = 0; sample < 128; ++sample) {
+        allocation_count = 0;
+        count_allocations = true;
+        auto result = pool.submit(allocation_task);
+        count_allocations = false;
+        if (sample == 0 || allocation_count < preparation_allocations) {
+            preparation_allocations = allocation_count;
+        }
+        execute_one();
+        assert(result.get() == 3);
+    }
+    assert(preparation_allocations > 0);
+
+    // 队列扩容失败不改变已有任务，异常直接传播且可重试。
     std::vector<std::future<int>> before_allocation_failure;
     before_allocation_failure.reserve(2048);
-    watched_progress = &pool.unfinished_tasks_;
     bool allocation_failed = false;
     for (int attempt = 0; attempt < 2048 && !allocation_failed; ++attempt) {
-        const auto previous_id = pool.last_accepted_id_;
         const auto previous_size = pool.tasks_.size();
-        progress_before_push = pool.unfinished_tasks_.size();
+        allocations_before_failure = preparation_allocations;
         fail_queue_allocation = true;
         try {
-            before_allocation_failure.push_back(pool.submit([] { return 3; }));
+            before_allocation_failure.push_back(pool.submit(allocation_task));
         } catch (const std::bad_alloc&) {
             allocation_failed = true;
-            assert(pool.last_accepted_id_ == previous_id);
             assert(pool.tasks_.size() == previous_size);
-            assert(pool.unfinished_tasks_.size() == progress_before_push);
+            assert(!fail_queue_allocation); // 确认异常来自已启用的分配注入。
         }
         fail_queue_allocation = false;
     }
-    watched_progress = nullptr;
     assert(allocation_failed);
     auto retry = pool.submit([] { return 4; });
     drain();
     for (auto& result : before_allocation_failure) { assert(result.get() == 3); }
     assert(retry.get() == 4);
 
-    const auto saved_id = pool.last_accepted_id_;
-    pool.last_accepted_id_ = std::numeric_limits<std::uint64_t>::max();
-    bool overflow_reported = false;
-    try { (void)pool.submit([] { return 1; }); }
-    catch (const std::overflow_error& error) {
-        overflow_reported = std::string(error.what()) == "thread pool task ID exhausted";
-    }
-    assert(overflow_reported && pool.tasks_.empty() && pool.unfinished_tasks_.empty());
-    assert(pool.last_accepted_id_ == std::numeric_limits<std::uint64_t>::max());
-    pool.last_accepted_id_ = saved_id;
 }
 
 int main() {
